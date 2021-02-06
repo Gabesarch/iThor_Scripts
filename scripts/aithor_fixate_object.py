@@ -10,6 +10,7 @@ import time
 import quaternion
 import math
 import pickle
+from scipy.spatial.transform import Rotation as R
 
 class Ai2Thor():
     def __init__(self):   
@@ -32,10 +33,10 @@ class Ai2Thor():
             mapname = 'FloorPlan' + str(i)
             mapnames.append(mapname)
 
-
+        np.random.seed(1)
         random.shuffle(mapnames)
         self.mapnames = mapnames
-        self.num_episodes = 1 #len(self.mapnames)   
+        self.num_episodes = len(self.mapnames)   
 
         self.ignore_classes = []  
         # classes to save   
@@ -62,7 +63,7 @@ class Ai2Thor():
         self.num_any_views = 7
         self.num_views = 25
 
-        self.obj_per_scene = 10
+        self.obj_per_scene = 5
 
         # self.origin_quaternion = np.quaternion(1, 0, 0, 0)
         # self.origin_rot_vector = quaternion.as_rotation_vector(self.origin_quaternion) 
@@ -172,6 +173,186 @@ class Ai2Thor():
         axis = axis.astype(np.float)
         axis /= np.linalg.norm(axis)
         return quaternion.from_rotation_vector(theta * axis)
+
+    def safe_inverse_single(self,a):
+        r, t = self.split_rt_single(a)
+        t = np.reshape(t, (3,1))
+        r_transpose = r.T
+        inv = np.concatenate([r_transpose, -np.matmul(r_transpose, t)], 1)
+        bottom_row = a[3:4, :] # this is [0, 0, 0, 1]
+        # bottom_row = torch.tensor([0.,0.,0.,1.]).view(1,4) 
+        inv = np.concatenate([inv, bottom_row], 0)
+        return inv
+    
+    def split_rt_single(self,rt):
+        r = rt[:3, :3]
+        t = np.reshape(rt[:3, 3], 3)
+        return r, t
+
+    def eul2rotm(self, rx, ry, rz):
+        # inputs are shaped B
+        # this func is copied from matlab
+        # R = [  cy*cz   sy*sx*cz-sz*cx    sy*cx*cz+sz*sx
+        #        cy*sz   sy*sx*sz+cz*cx    sy*cx*sz-cz*sx
+        #        -sy            cy*sx             cy*cx]
+        # rx = np.expand_dims(rx, axis=1)
+        # ry = np.expand_dims(ry, axis=1)
+        # rz = np.expand_dims(rz, axis=1)
+        # st()
+        # these are B x 1
+        sinz = np.sin(rz)
+        siny = np.sin(ry)
+        sinx = np.sin(rx)
+        cosz = np.cos(rz)
+        cosy = np.cos(ry)
+        cosx = np.cos(rx)
+        r11 = cosy*cosz
+        r12 = sinx*siny*cosz - cosx*sinz
+        r13 = cosx*siny*cosz + sinx*sinz
+        r21 = cosy*sinz
+        r22 = sinx*siny*sinz + cosx*cosz
+        r23 = cosx*siny*sinz - sinx*cosz
+        r31 = -siny
+        r32 = sinx*cosy
+        r33 = cosx*cosy
+
+        r = np.array([[r11, r12, r13], 
+                    [r21, r22, r23],
+                    [r31, r32, r33]
+                    ])
+        # r1 = np.stack([r11,r12,r13],axis=2)
+        # r2 = np.stack([r21,r22,r23],axis=2)
+        # r3 = np.stack([r31,r32,r33],axis=2)
+        # r = np.concatenate([r1,r2,r3],axis=1)
+        return r
+
+    def rotm2eul(self,r):
+        # r is Bx3x3, or Bx4x4
+        r00 = r[0,0]
+        r10 = r[1,0]
+        r11 = r[1,1]
+        r12 = r[1,2]
+        r20 = r[2,0]
+        r21 = r[2,1]
+        r22 = r[2,2]
+        
+        ## python guide:
+        # if sy > 1e-6: # singular
+        #     x = math.atan2(R[2,1] , R[2,2])
+        #     y = math.atan2(-R[2,0], sy)
+        #     z = math.atan2(R[1,0], R[0,0])
+        # else:
+        #     x = math.atan2(-R[1,2], R[1,1])
+        #     y = math.atan2(-R[2,0], sy)
+        #     z = 0
+        
+        sy = np.sqrt(r00*r00 + r10*r10)
+        
+        cond = (sy > 1e-6)
+        rx = np.where(cond, np.arctan2(r21, r22), np.arctan2(-r12, r11))
+        ry = np.where(cond, np.arctan2(-r20, sy), np.arctan2(-r20, sy))
+        rz = np.where(cond, np.arctan2(r10, r00), np.zeros_like(r20))
+
+        # rx = torch.atan2(r21, r22)
+        # ry = torch.atan2(-r20, sy)
+        # rz = torch.atan2(r10, r00)
+        # rx[cond] = torch.atan2(-r12, r11)
+        # ry[cond] = torch.atan2(-r20, sy)
+        # rz[cond] = 0.0
+        return rx, ry, rz
+    
+    def generate_xyz_habitatCamXs(self, flat_obs):
+
+        pix_T_camX = self.pix_T_camX
+        xyz_camXs = []
+        for i in range(2): #depth_camXs.shape[0]):
+            K = pix_T_camX
+            xs, ys = np.meshgrid(np.linspace(-1*self.W/2.,1*self.W/2.,self.W), np.linspace(1*self.W/2.,-1*self.W/2.,self.W))
+            depth = flat_obs[i]['depth_sensor'].reshape(1,self.W,self.W)
+            if i>0:
+                rotation_X = flat_obs[i]['rotations'] #quaternion.as_rotation_matrix(rot)
+                pos = flat_obs[i]['positions']
+                euler_rot_X = flat_obs[i]["rotations_euler"]
+                # euler_rot_X_rad = np.radians(flat_obs[i]["rotations_euler"])
+                origin_T_camX_4x4 = np.eye(4)
+                origin_T_camX_4x4[0:3,0:3] = rotation_X
+                origin_T_camX_4x4[0:3,3] = pos
+                origin_T_camX = rotation_X
+                camX_T_origin_4x4 = self.safe_inverse_single(origin_T_camX_4x4)
+                camX0_T_camX = np.matmul(camX0_T_origin, origin_T_camX)
+                camX0_T_camX_4x4 = np.matmul(camX0_T_origin_4x4, origin_T_camX_4x4)
+                # camX0_T_camX = np.matmul(rotation_0, np.linalg.inv(origin_T_camX))
+                # camX0_T_camX_4x4 = np.matmul(origin_T_camX0_4x4, camX_T_origin_4x4)
+                # r = R.from_matrix(camX0_T_camX)
+                # print("CamX0_T_camX CHECK: ", r.as_euler('xyz', degrees=True))
+                # r = R.from_matrix(origin_T_camX_4x4[0:3,0:3])
+                # print("CamX0_T_camX CHECK: ", r.as_euler('xyz', degrees=True))
+                # r = R.from_matrix(rotation_X)
+                # rx = euler_rot_X_rad[0]
+                # ry = euler_rot_X_rad[1]
+                # rz = euler_rot_X_rad[2]
+                # rotm = self.eul2rotm(rx, ry, rz)
+                rx, ry, rz = self.rotm2eul(rotation_X)
+                print("EULER ACTUAL: ", euler_rot_X)
+                print("EULER OBTAINED: ", rx, ry, rz)
+                
+                rx, ry, rz = self.rotm2eul(camX0_T_camX)
+                # print("origin_T_camx CHECK: ", r.as_euler('xyz', degrees=True))s
+                print("EULER SUBTRACT: ", euler_rot_0 - euler_rot_X)
+                print("EULER OBTAINED: ", rx, ry, rz)
+                # st()
+            elif i==0:
+                rotation_0 = flat_obs[i]['rotations'] #quaternion.as_rotation_matrix(rot)
+                pos = flat_obs[i]['positions']
+                euler_rot_0 = flat_obs[i]["rotations_euler"]
+                origin_T_camX0_4x4 = np.eye(4)
+                origin_T_camX0_4x4[0:3,0:3] = rotation_0
+                origin_T_camX0_4x4[0:3,3] = pos
+                camX0_T_origin_4x4 = self.safe_inverse_single(origin_T_camX0_4x4)
+                camX0_T_origin = np.linalg.inv(rotation_0)
+
+            xs = xs.reshape(1,self.W,self.W)
+            ys = ys.reshape(1,self.W,self.W)
+
+            xys = np.vstack((xs * depth , ys * depth, -depth, np.ones(depth.shape)))
+            xys = xys.reshape(4, -1)
+            xy_c0 = np.matmul(np.linalg.inv(K), xys)
+            xyz_camX = xy_c0.T[:,:3]
+            xyz_camXs.append(xyz_camX)
+            if i ==1:
+                xyz = np.expand_dims(xyz_camX, axis=0)
+                B, N, _ = list(xyz.shape)
+                ones = np.ones_like(xyz[:,:,0:1])
+                xyz1 = np.concatenate([xyz, ones], 2)
+                xyz1_t = np.transpose(xyz1, (0, 2, 1))
+                # this is B x 4 x N
+                xyz2_t = np.matmul(camX0_T_camX_4x4, xyz1_t)
+                xyz2 = np.transpose(xyz2_t, (0, 2, 1))
+                xyz2 = np.squeeze(xyz2[:,:,:3])
+                # xyz2 = xyz_camX
+
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D
+        fig = plt.figure()
+        # ax = fig.add_subplot(111, projection='3d')
+        xs = xyz2[:,0]
+        ys = xyz2[:,1]
+        zs = xyz2[:,2]
+        # ax.scatter(xs, ys, zs)
+        plt.plot(xs, zs, 'x', color = 'red')
+        xyz3 = xyz_camXs[0]
+        xs = xyz3[:,0]
+        ys = xyz3[:,1]
+        zs = xyz3[:,2]
+        # ax.scatter(xs, ys, zs)
+        plt.plot(xs, zs, 'o', color = 'blue')
+        plt_name = '/home/nel/gsarch/aithor/data/pointcloud.png'
+        plt.savefig(plt_name)
+        st()
+
+
+
+        return np.stack(xyz_camXs)
     
     def run2(self):
         event = self.controller.step('GetReachablePositions')
@@ -183,13 +364,21 @@ class Ai2Thor():
         event = self.controller.step('GetReachablePositions')
         self.nav_pts = event.metadata['reachablePositions']
         self.nav_pts = np.array([list(d.values()) for d in self.nav_pts])
-        objects = np.random.choice(event.metadata['objects'], self.obj_per_scene, replace=False)
+        np.random.seed(1)
+        # objects = np.random.choice(event.metadata['objects'], self.obj_per_scene, replace=False)
+        objects = event.metadata['objects']
+        objects_inds = np.arange(len(event.metadata['objects']))
+        np.random.shuffle(objects_inds)
 
         # objects = np.random.shuffle(event.metadata['objects'])
         # for obj in event.metadata['objects']: #objects:
         #     print(obj['name'])
         # objects = objects[0]
-        for obj in objects:
+        successes = 0
+        meta_obj_idx = 0
+        while successes < self.obj_per_scene and meta_obj_idx <= len(event.metadata['objects']) - 1: #obj in objects: #event.metadata['objects']: #objects:
+            obj = objects[objects_inds[meta_obj_idx]]
+            meta_obj_idx += 1
             print("Object is ", obj['objectType'])
             # if obj['name'] in ['Microwave_b200e0bc']:
             #     print(obj['name'])
@@ -203,23 +392,13 @@ class Ai2Thor():
 
             
             # Calculate distance to object center
-            # obj_center = np.array(list(obj['position'].values()))
             obj_center = np.array(list(obj['axisAlignedBoundingBox']['center'].values()))
-            
-            # obj_center = np.array(list(obj['position'].values()))
-            
-            #print(obj_center)
+                        
             obj_center = np.expand_dims(obj_center, axis=0)
-            #print(obj_center)
             distances = np.sqrt(np.sum((self.nav_pts - obj_center)**2, axis=1))
 
             # Get points with r_min < dist < r_max
             valid_pts = self.nav_pts[np.where((distances > self.radius_min)*(distances<self.radius_max))]
-            # if not valid_pts:
-                # continue
-
-            # plot valid points that we happen to select
-            # self.plot_navigable_points(valid_pts)
 
             # Bin points based on angles [vertical_angle (10 deg/bin), horizontal_angle (10 deg/bin)]
             valid_pts_shift = valid_pts - obj_center
@@ -231,21 +410,11 @@ class Ai2Thor():
             # Get yaw for binning 
             valid_yaw = np.degrees(np.arctan2(dz,dx))
 
-            # # pitch calculation 
-            # dxdz_norm = np.sqrt((dx * dx) + (dz * dz))
-            # valid_pitch = np.degrees(np.arctan2(dy,dxdz_norm))
-
-            # binning yaw around object
-            # nbins = 18
-
             nbins = 18
             bins = np.linspace(-180, 180, nbins+1)
             bin_yaw = np.digitize(valid_yaw, bins)
 
-            num_valid_bins = np.unique(bin_yaw).size
-
-            # spawns_per_bin = int(self.num_views / num_valid_bins) + 2
-            
+            num_valid_bins = np.unique(bin_yaw).size            
 
             if False:
                 import matplotlib.cm as cm
@@ -273,11 +442,14 @@ class Ai2Thor():
             action = "do_nothing"
             episodes = []
             valid_pts_selected = []
+            camXs_T_camX0_4x4 = []
+            camX0_T_camXs_4x4 = []
+            origin_T_camXs = []
+            origin_T_camXs_t = []
             cnt = 0
             for b in range(nbins):
                 
                 # get all angle indices in the current bin range
-                # st()
                 inds_bin_cur = np.where(bin_yaw==(b+1)) # bins start 1 so need +1
                 inds_bin_cur = list(inds_bin_cur[0])
                 if len(inds_bin_cur) == 0:
@@ -292,109 +464,57 @@ class Ai2Thor():
                     rand_ind = np.random.randint(0, len(inds_bin_cur))
                     s_ind = inds_bin_cur.pop(rand_ind)
 
-                    # st()
-                    # s_ind = np.random.choice(inds_bin_cur)
-                    #s_ind = inds_bin_cur[0][0]
                     pos_s = valid_pts[s_ind]
                     valid_pts_selected.append(pos_s)
-
-                    # event = self.controller.step('TeleportFull', x=pos_s[0], y=pos_s[1], z=pos_s[2], rotation=dict(x=0.0, y=180.0, z=0.0), horizon=0.0)
-                    # agent_pos = list(event.metadata['agent']['position'].values())
-                    # print("Agent rot " , event.metadata['agent']['rotation'])
-                    # print("Agent pos " , event.metadata['agent']['position'])
-                    # print("Object center ", obj['axisAlignedBoundingBox']['center'])
 
                     # add height from center of agent to camera
                     pos_s[1] = pos_s[1] + 0.675
 
                     # YAW calculation - rotate to object
-                    agent_to_obj = np.squeeze(obj_center) - pos_s # + np.array([0.0, 0.675, 0.0]))
-                    agent_local_forward = np.array([0, 0, -1.0]) # y, z, x
-                    # agent_local_forward = np.array([-1.0, 0, 0]) # y, z, x
+                    agent_to_obj = np.squeeze(obj_center) - pos_s 
+                    agent_local_forward = np.array([0, 0, 1.0]) 
                     flat_to_obj = np.array([agent_to_obj[0], 0.0, agent_to_obj[2]])
                     flat_dist_to_obj = np.linalg.norm(flat_to_obj)
                     flat_to_obj /= flat_dist_to_obj
 
                     det = (flat_to_obj[0] * agent_local_forward[2]- agent_local_forward[0] * flat_to_obj[2])
                     turn_angle = math.atan2(det, np.dot(agent_local_forward, flat_to_obj))
-                    # quat_yaw = self.quat_from_angle_axis(turn_angle, np.array([0, 1.0, 0]))
 
-                    # turn_yaw = np.degrees(quaternion.as_euler_angles(quat_yaw)[1])
                     turn_yaw = np.degrees(turn_angle)
-                    # print("Turn Yaw=", turn_yaw)
-                    # print("turn1 beg ", turn_yaw)
 
-                    # agent_pos = list(event.metadata['agent']['position'].values())
-                    # dist_to_origin = np.sqrt(agent_pos[0]**2 + agent_pos[2]**2)
-                    # dist_to_object = np.sqrt((agent_pos[0] - obj_center[0,0])**2 + (agent_pos[2] - obj_center[0,2])**2)
-
-                    # print("Agent rot " , event.metadata['agent']['rotation'])
-
-                    # p0 = agent_pos
-                    # p1 = np.squeeze(obj_center)
-                    # C = np.cross(p0, p1) 
-                    # D = np.dot(p0, p1)
-                    # NP0 = np.linalg.norm(p0) 
-                    # if ~np.all(C==0): # check for colinearity    
-                    #     Z = np.array([[0, -C[2], C[1]], [C[2], 0, -C[0]], [-C[1], C[0], 0]])
-                    #     R = (np.eye(3) + Z + Z**2 * (1-D)/(np.linalg.norm(C)**2)) / NP0**2 # rotation matrix
-                    # else:
-                    #     R = np.sign(D) * (np.linalg.norm(p1) / NP0) # orientation and scaling
-                    
-                    # quat_rot = quaternion.from_rotation_matrix(R)
-                    # turns = np.degrees(quaternion.as_euler_angles(quat_rot))
-                    # turn_yaw = turns[1]
-                    # print("turn1 ", turn_yaw)
-                    # print("turn0 ", turns[0])
-                    # print("turn2 ", turns[2])
-
-                    # if dist_to_origin > dist_to_object:
-                    #     print('or>ob')
-                    #     turn_yaw2 = np.degrees(np.cos(dist_to_object/dist_to_origin))
-                    # else:
-                    #     print('or>ob')
-                    #     turn_yaw2 = np.degrees(np.cos(dist_to_origin/dist_to_object))
-                    # print("TURN YAW2, ", turn_yaw2)
-                    # Calculate Pitch from head to object
                     turn_pitch = -np.degrees(math.atan2(agent_to_obj[1], flat_dist_to_obj))
-                    # movement = "LookUp" if turn_pitch>0 else "LookDown"
-                    # event = controller.step(movement, degrees=np.abs(turn_pitch))
 
-                    event = self.controller.step('TeleportFull', x=pos_s[0], y=pos_s[1], z=pos_s[2], rotation=dict(x=0.0, y=180.0 + int(turn_yaw), z=0.0), horizon=int(turn_pitch))
-                    # movement = "RotateRight" if turn_yaw>0 else "RotateLeft"
-                    # event = self.controller.step(action='RotateRight', rotation=int(np.abs(turn_yaw)))
-
-                    # movement = "LookDown" if turn_pitch>0 else "LookUp"
-                    # event = self.controller.step(movement, degrees=np.abs(turn_pitch))
-
-                    # print("Agent rot " , event.metadata['agent']['rotation'])
-
-                    # angle_ranges = np.arange(0, 360, 15)
-                    # angles_test = np.ones_like(angle_ranges) * 15
-                    # for i in angle_ranges:
-                    #     movement = "RotateRight"
-                    #     event = self.controller.step(movement, degrees=15.0)
-
-                    #     rgb = event.frame
-                        
-                    #     if True:
-                    #         plt.imshow(rgb)
-                    #         plt_name = f'/home/nel/gsarch/aithor/data/img{i}.png'.format(i)
-                    #         plt.savefig(plt_name)
-                    # print(event.metadata['agent']['position'])
-                    # print(event.metadata['agent']['rotation'])
+                    event = self.controller.step('TeleportFull', x=pos_s[0], y=pos_s[1], z=pos_s[2], rotation=dict(x=0.0, y=int(turn_yaw), z=0.0), horizon=int(turn_pitch))
 
                     rgb = event.frame
 
-                    rotation_euler_radians = np.radians(np.array([event.metadata['agent']['cameraHorizon'], event.metadata['agent']['rotation']['y'], 0.0]))
+                    eulers_xyz_rad = np.radians(np.array([event.metadata['agent']['cameraHorizon'], event.metadata['agent']['rotation']['y'], 0.0]))
 
-                    observations["positions"] = np.array(list(event.metadata['agent']['position'].values())) + np.array([0.0, 0.675, 0.0])
-                    # print(observations["positions"])
-                    # print(pos_s)
-                    # observations["rotations"] = quaternion.from_euler_angles(np.radians(np.array(list(event.metadata['agent']['rotation'].values()))))
-                    observations["rotations"] = quaternion.from_euler_angles(rotation_euler_radians)
+                    rx = eulers_xyz_rad[0]
+                    ry = eulers_xyz_rad[1]
+                    rz = eulers_xyz_rad[2]
+                    rotation_r_matrix = self.eul2rotm(-rx, -ry, rz)
 
-                    # print(observations["positions"])
+                    agent_position = np.array(list(event.metadata['agent']['position'].values())) + np.array([0.0, 0.675, 0.0])
+                    # need to invert since z is positive here by convention
+                    agent_position[2] =  -agent_position[2]
+
+
+                    observations["positions"] = agent_position
+
+                    observations["rotations"] = rotation_r_matrix
+
+                    # rt_4x4 = np.eye(4)
+                    # rt_4x4[0:3,0:3] = observations["rotations"]
+                    # rt_4x4[0:3,3] = observations["positions"]
+                    # rt_4x4_inv = self.safe_inverse_single(rt_4x4)
+                    # r, t = self.split_rt_single(rt_4x4_inv)
+
+                    # observations["positions"] = r
+
+                    # observations["positions"] = t
+
+                    # observations["rotations_euler"] = np.array([rx, ry, rz]) #rotation_r.as_euler('xyz', degrees=True)
 
                     observations["color_sensor"] = rgb
                     observations["depth_sensor"] = event.depth_frame
@@ -452,6 +572,7 @@ class Ai2Thor():
                             plt.savefig(plt_name)
 
                         obj_center_axisAligned = np.array(list(obj_meta['axisAlignedBoundingBox']['center'].values()))
+                        obj_center_axisAligned[2] = -obj_center_axisAligned[2]
                         obj_size_axisAligned = np.array(list(obj_meta['axisAlignedBoundingBox']['size'].values()))
                         
                         # print(obj_category_name)
@@ -474,8 +595,67 @@ class Ai2Thor():
                     if self.verbose:
                         print("episode is valid......")
                     episodes.append(observations)
+                    # print(cnt)
+
+                    if False:
+                        if cnt > 0:
+
+                            origin_T_camX = episodes[cnt]["rotations"]
+
+                            r = R.from_matrix(origin_T_camX)
+                            print("EULER CHECK: ", r.as_euler('xyz', degrees=True))
+
+                            camX0_T_camX = np.matmul(camX0_T_origin, origin_T_camX)
+                            r = R.from_matrix(camX0_T_camX)
+                            print("EULER CHECK: ", r.as_euler('xyz', degrees=True))
+                            # camX0_T_camX = np.matmul(camX0_T_origin, origin_T_camX)
+                            r = R.from_matrix(camX0_T_origin)
+                            print("EULER CHECK: ", r.as_euler('xyz', degrees=True))
+
+                            origin_T_camXs.append(origin_T_camX)
+                            origin_T_camXs_t.append(episodes[cnt]["positions"])
+
+                            origin_T_camX_4x4 = np.eye(4)
+                            origin_T_camX_4x4[0:3, 0:3] = origin_T_camX
+                            origin_T_camX_4x4[:3,3] = episodes[cnt]["positions"]
+                            camX0_T_camX_4x4 = np.matmul(camX0_T_origin_4x4, origin_T_camX_4x4)
+                            camX_T_camX0_4x4 = self.safe_inverse_single(camX0_T_camX_4x4)
+
+                            camXs_T_camX0_4x4.append(camX_T_camX0_4x4)
+                            camX0_T_camXs_4x4.append(camX0_T_camX_4x4)
+
+                            camX0_T_camX_quat = quaternion.from_rotation_matrix(camX0_T_camX)
+                            camX0_T_camX_eul = quaternion.as_euler_angles(camX0_T_camX_quat)
+
+                            camX0_T_camX_4x4 = self.safe_inverse_single(camX_T_camX0_4x4)
+                            origin_T_camX_4x4 = np.matmul(origin_T_camX0_4x4, camX0_T_camX_4x4)
+                            r_origin_T_camX, t_origin_T_camX, = self.split_rt_single(origin_T_camX_4x4)
+
+                            if self.verbose:
+                                print(r_origin_T_camX)
+                                print(origin_T_camX)
+
+                        else:
+                            origin_T_camX0 = episodes[0]["rotations"]
+                            camX0_T_origin = np.linalg.inv(origin_T_camX0)
+                            # camX0_T_origin = self.safe_inverse_single(origin_T_camX0)
+
+                            origin_T_camXs.append(origin_T_camX0)
+                            origin_T_camXs_t.append(episodes[0]["positions"])
+
+                            origin_T_camX0_4x4 = np.eye(4)
+                            origin_T_camX0_4x4[0:3, 0:3] = origin_T_camX0
+                            origin_T_camX0_4x4[:3,3] = episodes[0]["positions"]
+                            camX0_T_origin_4x4 = self.safe_inverse_single(origin_T_camX0_4x4)
+
+                            camXs_T_camX0_4x4.append(np.eye(4))
+
+                            camX0_T_camXs_4x4.append(np.eye(4))
+
+                            origin_T_camX0_t = episodes[0]["positions"]
                     
                     cnt +=1
+
                 
             if len(episodes) >= self.num_views:
                 print(f'num episodes: {len(episodes)}')
@@ -484,78 +664,23 @@ class Ai2Thor():
                 print("Saving to ", data_path)
                 os.mkdir(data_path)
                 # flat_obs = np.random.choice(episodes, self.num_views, replace=False)
+                np.random.seed(1)
                 rand_inds = np.sort(np.random.choice(len(episodes), self.num_views, replace=False))
                 bool_inds = np.zeros(len(episodes), dtype=bool)
                 bool_inds[rand_inds] = True
                 flat_obs = np.array(episodes)[bool_inds]
                 flat_obs = list(flat_obs)
                 viewnum = 0
+                if False:
+                    self.generate_xyz_habitatCamXs(flat_obs)
                 for obs in flat_obs:
                     self.save_datapoint(obs, data_path, viewnum, True)
                     viewnum += 1
+                print("SUCCESS #", successes)
+                successes += 1
             else:
                 print("Not enough episodes:", len(episodes))
-                    
-
-
-                    # mainobj_id = obj.id
-                    # main_id = int(mainobj_id[1:])
-                    # semantic = observations["semantic_sensor"]
-                    # mask = np.zeros_like(semantic)
-                    # mask[semantic == main_id] = 1
-                    # obj_is_visible = False if np.sum(mask)==0 else True
-
-                    # if self.is_valid_datapoint(observations, obj) and obj_is_visible:
-                    #     if self.verbose:
-                    #         print("episode is valid......")
-                    #     episodes.append(observations)
-                    #     if self.visualize:
-                    #         rgb = observations["color_sensor"]
-                    #         semantic = observations["semantic_sensor"]
-                    #         depth = observations["depth_sensor"]
-                    #         self.display_sample(rgb, semantic, depth, mainobj=obj, visualize=False)
-                    # if self.visualize:
-                    #         rgb = observations["color_sensor"]
-                    #         semantic = observations["semantic_sensor"]
-                    #         depth = observations["depth_sensor"]
-                    #         self.display_sample(rgb, semantic, depth, mainobj=obj, visualize=False)
-
-                    #print("agent_state: position", self.agent.state.position, "rotation", self.agent.state.rotation)
-
-                    
-        
 
 if __name__ == '__main__':
     Ai2Thor()
-
-controller = Controller(scene='FloorPlan28', gridSize=0.25)
-
-# event = controller.step(action='MoveAhead')
-# for obj in controller.last_event.metadata['objects']:
-#     print(obj['objectId'])
-
-event = controller.step('GetReachablePositions')
-positions = event.metadata['reachablePositions']
-
-angle = np.random.uniform(0, 359)
-event = controller.step(action='Rotate', rotation=angle)
-
-# for o in event.metadata['objects']:
-#     print(o['objectId'])
-
-obj_cur = np.random.choice(event.metadata['objects'])
-print(obj_cur['objectId'])
-obj_pos = list(obj_cur['position'].keys())
-obj_rot = list(obj_cur['rotation'].keys())
-
-event = controller.step('TeleportFull', x=obj_pos[0], y=obj_pos[1], z=obj_pos[2], rotation=dict(x=obj_rot[0], y=obj_rot[1], z=obj_rot[2]), horizon=30.0)
-im_rgb = event.frame #cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-# im_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-plt.imshow(im_rgb)
-plt_name = '/home/nel/gsarch/aithor/data/' + 'img.png'
-plt.savefig(plt_name)
-
-# cv2.imshow('image',bgr)
-# cv2.waitKey(0)
 
