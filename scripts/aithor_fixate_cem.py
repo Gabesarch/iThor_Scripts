@@ -138,9 +138,8 @@ class Ai2Thor():
         self.visualize = False
         self.verbose = False
         self.save_imgs = True
-        self.do_orbslam = False
-        self.do_depth_noise = False
-        self.makevideo = True
+
+        self.plot_loss = True
         # st()
 
         # these are all map names
@@ -154,13 +153,13 @@ class Ai2Thor():
             mapname = 'FloorPlan' + str(i)
             mapnames.append(mapname)
 
+        train_len = int(0.9 * len(mapnames))
+
         np.random.seed(1)
         random.shuffle(mapnames)
-        self.mapnames = mapnames
-        self.num_episodes = len(self.mapnames)   
-
-        self.max_iters = 100000
-        self.max_frames = 10
+        self.mapnames_train = mapnames[:train_len]
+        self.mapnames_val = mapnames[train_len:]
+        # self.num_episodes = len(self.mapnames)   
 
         self.ignore_classes = []  
         # classes to save   
@@ -192,6 +191,14 @@ class Ai2Thor():
 
         self.conf_thresh_detect = 0.7 # for initially detecting a low confident object
         self.conf_thresh_init = 0.8 # for after turning head toward object threshold
+        self.conf_thresh_end = 0.9 # if reach this then stop getting obs
+
+        self.BATCH_SIZE = 1
+        self.percentile = 70
+        self.max_iters = 100000
+        self.max_frames = 2
+        self.val_interval = 1
+        self.save_interval = 1
 
         self.small_classes = []
         self.rot_interval = 5.0
@@ -254,12 +261,10 @@ class Ai2Thor():
 
         batch = {"rewards": [], "obs": [], "actions": []}
         episode_rewards = 0.0
-        episode_steps = []
-
         iter_idx = 0
         while True:
 
-            mapname = np.random.choice(self.mapnames)
+            mapname = np.random.choice(mapnames)
 
             # self.basepath = self.homepath + f"/{mapname}_{episode}"
             # print("BASEPATH: ", self.basepath)
@@ -280,12 +285,13 @@ class Ai2Thor():
 
             episode_rewards, obs, actions = self.run()
 
-            print("Total reward for iter ",iter_idx," :",episode_rewards)
+            print("Total reward for train batch # ",iter_idx," :",episode_rewards)
 
             self.controller.stop()
             time.sleep(1)
 
-            if episode_rewards == False:
+            if episode_rewards is None:
+                print("NO EPISODE REWARDS.. SKIPPING BATCH INSTANCE")
                 continue
 
             batch["rewards"].append(episode_rewards)
@@ -293,28 +299,35 @@ class Ai2Thor():
             batch["actions"].append(actions) 
 
             iter_idx += 1   
-
-
-            if len(batch) == BATCH_SIZE:
+            print(len(batch["rewards"]))
+            if len(batch["rewards"]) == BATCH_SIZE:
 
                 yield batch
+                iter_idx = 0
+                batch = {"rewards": [], "obs": [], "actions": []}
+                
+            
+            if len(batch["rewards"]) > BATCH_SIZE:
+                st()
     
-    def elite_batch(batch,percentile):
+    def elite_batch(self,batch,percentile):
 
-        rewards = batch["rewards"]
+        rewards = np.array(batch["rewards"])
         obs = batch["obs"]
         actions = batch["actions"]
 
         rewards_mean = float(np.mean(rewards))
-
+        
         rewards_boundary = np.percentile(rewards,percentile)
+
+        print("Reward boundary: ", rewards_boundary)
 
         rewards_mean = float(np.mean(rewards))
 
         training_obs = []
         training_actions = []
 
-        for idx in rewards.shape[0]:
+        for idx in range(rewards.shape[0]):
             reward_idx = rewards[idx]
             if reward_idx < rewards_boundary:
                 continue
@@ -322,37 +335,150 @@ class Ai2Thor():
             training_obs.extend(obs[idx])
             training_actions.extend(actions[idx])
 
-        obs_tensor = torch.FloatTensor(training_obs)
+        obs_tensor = torch.FloatTensor(training_obs).permute(0, 3, 1, 2)
         act_tensor = torch.LongTensor(training_actions)
 
         return obs_tensor, act_tensor, rewards_mean, rewards_boundary
+    
+    def run_val(self, mapnames, BATCH_SIZE):
 
-    def run_episodes(self):
-        self.ep_idx = 0
-        BATCH_SIZE=10
-        percentile = 70
-        # self.objects = []
+        batch = {"rewards": [], "obs": [], "actions": []}
+        episode_rewards = 0.0
+        episode_steps = []
 
-        for iteration, batch in enumerate(self.batch_iteration(self.mapnames,self.cemnet,BATCH_SIZE)):
-            print("ITERATION #", iteration)
+        iter_idx = 0
+        while True:
 
-            train, labels, mean_rewards, boudary = self.elite_batch(batch,percentile)
+            mapname = np.random.choice(mapnames)
 
-            optimizer.zero_grad()
+            # self.basepath = self.homepath + f"/{mapname}_{episode}"
+            # print("BASEPATH: ", self.basepath)
+
+            # # self.basepath = f"/hdd/ayushj/habitat_data/{mapname}_{episode}"
+            # if not os.path.exists(self.basepath):
+            #     os.mkdir(self.basepath)
+
+            self.controller = Controller(
+                scene=mapname, 
+                gridSize=0.25,
+                width=self.W,
+                height=self.H,
+                fieldOfView= self.fov,
+                renderObjectImage=True,
+                renderDepthImage=True,
+                )
+
+            episode_rewards, obs, actions = self.run()
+
+            print("Total reward for val batch # ",iter_idx," :",episode_rewards)
+
+            self.controller.stop()
+            time.sleep(1)
+
+            if episode_rewards is None:
+                print("NO EPISODE REWARDS.. SKIPPING BATCH INSTANCE")
+                continue
+
+            batch["rewards"].append(episode_rewards)
+            batch["obs"].append(obs)
+            batch["actions"].append(actions) 
+
+            train, labels, mean_rewards, boudary = self.elite_batch(batch,self.percentile)
 
             scores = self.cemnet(train, softmax=False)
 
             loss_value = self.loss(scores,labels)
+
+            iter_idx += 1   
+
+            if len(batch["rewards"]) == BATCH_SIZE:
+
+                break
+            
+
+        
+        return loss_value, mean_rewards
+
+    def run_episodes(self):
+        self.ep_idx = 0
+        # self.objects = []
+
+        train_loss = []
+        val_loss = []
+        train_iters = []
+        val_iters = []
+        mean_rewards_train = []
+        mean_rewards_val = []
+        if self.plot_loss:
+            # plt.figure(1) # loss
+            # plt.figure(2) # reward
+            fig, (ax1, ax2) = plt.subplots(1, 2)
+        for iteration, batch in enumerate(self.batch_iteration(self.mapnames_train,self.cemnet,self.BATCH_SIZE)):
+            print("ITERATION #", iteration)
+
+            train, labels, mean_rewards, boudary = self.elite_batch(batch,self.percentile)
+            mean_rewards_train.append(mean_rewards)
+
+            self.optimizer.zero_grad()
+
+            scores = self.cemnet(train, softmax=False)
+
+            loss_value = self.loss(scores,labels)
+            train_loss.append(float(loss_value.clone().detach().cpu().numpy()))
+            train_iters.append(iteration)
 
             back_v = loss_value.backward()
 
             self.optimizer.step()
 
             print('rewards mean = ',mean_rewards)
+            print('')
 
             if iteration >= self.max_iters:
                 print("MAX ITERS REACHED")
                 break
+
+            # if self.plot_loss:
+                # plt.figure(1) # loss
+                # fig.clf()
+
+                # plt.figure(2) # reward
+                # plt.clf()
+
+            if iteration % self.val_interval == 0:
+                loss_val, mean_rewards = self.run_val(self.mapnames_val, self.BATCH_SIZE)
+                val_loss.append(float(loss_val.clone().detach().cpu().numpy()))
+                val_iters.append(iteration)
+                mean_rewards_val.append(mean_rewards)
+                if self.plot_loss:
+                    # plt.figure(1) # loss
+                    ax1.plot(val_iters, val_loss, color='red')
+
+                    # plt.figure(2) # reward
+                    ax2.plot(val_iters, mean_rewards_val, color='red')
+
+            if iteration % self.save_interval == 0:
+                PATH = f'/home/nel/gsarch/aithor/data/test/checkpoint{iteration}.tar'
+                torch.save(self.cemnet.state_dict(), PATH)
+            
+            if self.plot_loss:
+                # plt.figure(1) # loss
+                ax1.plot(train_iters, train_loss, color='blue')
+                ax1.set(xlabel='iterations', ylabel='loss')
+                # ax1.xlabel('iterations')
+                # ax1.ylabel('loss')
+                # plt_name = '/home/nel/gsarch/aithor/data/test/loss.png'
+                # fig.savefig(plt_name)
+
+                # plt.figure(2) # reward
+                ax2.plot(train_iters, mean_rewards_train, color='blue')
+                ax2.set(xlabel='iterations', ylabel='reward')
+                # ax2.xlabel('iterations')
+                # ax2.ylabel('reward')
+
+                plt_name = '/home/nel/gsarch/aithor/data/test/train.png'
+                fig.savefig(plt_name)
+             
 
             # if mean_rewards > 500:
             #     print('Accomplished!')
@@ -510,7 +636,7 @@ class Ai2Thor():
             if obj['objectType'] not in self.objects:
                 self.objects.append(obj['objectType'])
 
-    def get_detectron_conf_center_obj(self,im):
+    def get_detectron_conf_center_obj(self,im, frame=None):
         im = Image.fromarray(im, mode="RGB")
         im = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
 
@@ -523,9 +649,9 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
         seg_im = out.get_image()
 
-        if True:
+        if False:
             plt.imshow(seg_im)
-            plt_name = '/home/nel/gsarch/aithor/data/test/seg.png'
+            plt_name = f'/home/nel/gsarch/aithor/data/test/seg{frame}.png'
             plt.savefig(plt_name)
             # plt.show()
 
@@ -572,7 +698,7 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
         seg_im = out.get_image()
 
-        if True:
+        if False:
             plt.imshow(seg_im)
             plt_name = '/home/nel/gsarch/aithor/data/test/seg_init.png'
             plt.savefig(plt_name)
@@ -748,7 +874,8 @@ class Ai2Thor():
         while True: #successes < self.obj_per_scene and meta_obj_idx <= len(event.metadata['objects']) - 1: 
             if meta_obj_idx > len(event.metadata['objects']) - 1:
                 print("OUT OF OBJECT... RETURNING")
-                return False, False, False
+                st()
+                return None, None, None
                 
             obj = objects[objects_inds[meta_obj_idx]]
             meta_obj_idx += 1
@@ -793,8 +920,11 @@ class Ai2Thor():
             event = self.controller.step('TeleportFull', x=pos_s[0], y=pos_s[1], z=pos_s[2], rotation=dict(x=0.0, y=int(turn_yaw), z=0.0), horizon=int(turn_pitch))
             rgb = event.frame
             init_conf = self.get_detectron_conf_center_obj(rgb)
+            if init_conf is None:
+                print("Nothing detected in the center... SKIPPING")
+                continue
             conf_prev = init_conf
-            if conf > self.conf_thresh_init:
+            if init_conf > self.conf_thresh_init:
                 print("HIGH INITIAL CONFIDENCE... SKIPPING...")
                 continue
             
@@ -804,7 +934,7 @@ class Ai2Thor():
             frame = 0
             while True:
 
-                rgb_tensor = torch.FloatTensor([rgb])
+                rgb_tensor = torch.FloatTensor([rgb]).permute(0, 3, 1, 2)
                 
                 actions_probability = self.cemnet(rgb_tensor, softmax=True)
 
@@ -812,15 +942,19 @@ class Ai2Thor():
 
                 action_ind = np.random.choice(len(act_proba),p=act_proba)
 
-                action = self.action_space[action_indxs]
+                action = self.action_space[action_ind]
 
                 event = self.controller.step(action)
                 rgb = event.frame
 
-                conf_cur = self.get_detectron_conf_center_obj(rgb)
-
-                reward = (conf_cur - conf_prev)/(1 - init_conf) # normalize by intial confidence to account for differences in starting confidence
-                conf_prev = conf_cur
+                conf_cur = self.get_detectron_conf_center_obj(rgb, frame)
+                if conf_cur is None:
+                    reward = -0.2 # fixed negative reward for no detection 
+                    conf_cur = conf_prev
+                    conf_prev = conf_prev # use same conf
+                else:
+                    reward = (conf_cur - conf_prev)/(1 - init_conf) # normalize by intial confidence to account for differences in starting confidence
+                    conf_prev = conf_cur
                 
                 episode_rewards += reward
 
