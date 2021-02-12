@@ -193,12 +193,12 @@ class Ai2Thor():
         self.conf_thresh_init = 0.8 # for after turning head toward object threshold
         self.conf_thresh_end = 0.9 # if reach this then stop getting obs
 
-        self.BATCH_SIZE = 1
+        self.BATCH_SIZE = 12
         self.percentile = 70
         self.max_iters = 100000
-        self.max_frames = 2
-        self.val_interval = 1
-        self.save_interval = 1
+        self.max_frames = 10
+        self.val_interval = 15
+        self.save_interval = 50
 
         self.small_classes = []
         self.rot_interval = 5.0
@@ -207,13 +207,14 @@ class Ai2Thor():
         self.num_flat_views = 3
         self.num_any_views = 7
         self.num_views = 25
+        self.center_from_mask = False # get object centroid from maskrcnn (True) or gt (False)
 
         self.obj_per_scene = 5
 
         # self.origin_quaternion = np.quaternion(1, 0, 0, 0)
         # self.origin_rot_vector = quaternion.as_rotation_vector(self.origin_quaternion) 
 
-        self.homepath = f'/home/nel/gsarch/aithor/data/test'
+        self.homepath = f'/home/nel/gsarch/aithor/data/test2'
         # self.basepath = '/home/nel/gsarch/replica_traj_bed'
         if not os.path.exists(self.homepath):
             os.mkdir(self.homepath)
@@ -384,8 +385,10 @@ class Ai2Thor():
             batch["actions"].append(actions) 
 
             train, labels, mean_rewards, boudary = self.elite_batch(batch,self.percentile)
-
-            scores = self.cemnet(train, softmax=False)
+            
+            with torch.no_grad():
+                scores = self.cemnet(train, softmax=False)
+            st()
 
             loss_value = self.loss(scores,labels)
 
@@ -458,7 +461,7 @@ class Ai2Thor():
                     ax2.plot(val_iters, mean_rewards_val, color='red')
 
             if iteration % self.save_interval == 0:
-                PATH = f'/home/nel/gsarch/aithor/data/test/checkpoint{iteration}.tar'
+                PATH = self.homepath + f'/checkpoint{iteration}.tar'
                 torch.save(self.cemnet.state_dict(), PATH)
             
             if self.plot_loss:
@@ -476,7 +479,7 @@ class Ai2Thor():
                 # ax2.xlabel('iterations')
                 # ax2.ylabel('reward')
 
-                plt_name = '/home/nel/gsarch/aithor/data/test/train.png'
+                plt_name = os.path.join(self.homepath, 'train.png')
                 fig.savefig(plt_name)
              
 
@@ -649,7 +652,9 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
         seg_im = out.get_image()
 
-        if False:
+        if True:
+            plt.figure(1)
+            plt.clf()
             plt.imshow(seg_im)
             plt_name = f'/home/nel/gsarch/aithor/data/test/seg{frame}.png'
             plt.savefig(plt_name)
@@ -659,17 +664,19 @@ class Ai2Thor():
         pred_scores = outputs['instances'].scores
         pred_classes = outputs['instances'].pred_classes
 
-        W2_low = self.W//2 - 5
-        W2_high = self.W//2 + 5
-        H2_low = self.H//2 - 5
-        H2_high = self.H//2 + 5
+        len_pad = 5
+
+        W2_low = self.W//2 - len_pad
+        W2_high = self.W//2 + len_pad
+        H2_low = self.H//2 - len_pad
+        H2_high = self.H//2 + len_pad
 
         ind_obj = None
         max_overlap = 0
         for idx in range(pred_masks.shape[0]):
             pred_mask_cur = pred_masks[idx]
             pred_masks_center = pred_mask_cur[W2_low:W2_high, H2_low:H2_high]
-            print(torch.sum(pred_masks_center))
+            # print(torch.sum(pred_masks_center))
             if torch.sum(pred_masks_center) > max_overlap:
                 ind_obj = idx
                 max_overlap = torch.sum(pred_masks_center)
@@ -698,7 +705,9 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
         seg_im = out.get_image()
 
-        if False:
+        if True:
+            plt.figure(1)
+            plt.clf()
             plt.imshow(seg_im)
             plt_name = '/home/nel/gsarch/aithor/data/test/seg_init.png'
             plt.savefig(plt_name)
@@ -751,7 +760,7 @@ class Ai2Thor():
 
         if not obj_masks:
             return None
-        else: 
+        elif self.center_from_mask: 
 
             # want an object not on the edges of the image
             sum_interior = 0
@@ -780,8 +789,50 @@ class Ai2Thor():
             xyz_obj_mid = np.mean(xyz_obj_masked, axis=1)
 
             xyz_obj_mid[2] = -xyz_obj_mid[2]
+        else:
 
-            print("MIDPOINT=", xyz_obj_mid)
+            # want an object not on the edges of the image
+            sum_interior = 0
+            while True:
+                if len(obj_masks)==0:
+                    return None
+                random_int = np.random.randint(low=0, high=len(obj_masks))
+                obj_mask_focus = obj_masks.pop(random_int)
+                print("OBJECT ID INIT=", obj_catids[random_int])
+                sum_interior = torch.sum(obj_mask_focus[50:self.W-50, 50:self.H-50])
+                if sum_interior < 500:
+                    continue # exclude too small objects
+
+
+                pixel_locs_obj = np.where(obj_mask_focus)
+                x_mid = np.round(np.median(pixel_locs_obj[1])/self.W, 4)
+                y_mid = np.round(np.median(pixel_locs_obj[0])/self.H, 4)
+
+                if True:
+                    plt.figure(1)
+                    plt.clf()
+                    plt.imshow(obj_mask_focus)
+                    plt.plot(np.median(pixel_locs_obj[1]), np.median(pixel_locs_obj[0]), 'x')
+                    plt_name = '/home/nel/gsarch/aithor/data/test/seg_mask.png'
+                    plt.savefig(plt_name)
+
+                
+                event = self.controller.step('TouchThenApplyForce', x=x_mid, y=y_mid, handDistance = 1000000.0, direction=dict(x=0.0, y=0.0, z=0.0), moveMagnitude = 0.0)
+                obj_focus_id = event.metadata['actionReturn']['objectId']
+
+                xyz_obj_mid = None
+                for o in event.metadata['objects']:
+                    if o['objectId'] == obj_focus_id:
+                        xyz_obj_mid = np.array(list(o['axisAlignedBoundingBox']['center'].values()))
+                
+                if xyz_obj_mid is not None:
+                    break
+            # if xyz_obj_mid is None:
+            #     st()
+
+        print("MIDPOINT=", xyz_obj_mid)
+        return xyz_obj_mid
+        
 
             # semantic = event.instance_segmentation_frame
             # object_id_to_color = event.object_id_to_color
@@ -832,7 +883,7 @@ class Ai2Thor():
             #     obj_center_axisAligned[2] = -obj_center_axisAligned[2]
             #     obj_size_axisAligned = np.array(list(obj_meta['axisAlignedBoundingBox']['size'].values()))                        
 
-            return xyz_obj_mid
+            
 
     def get_rotation_to_obj(self, obj_center, pos_s):
         # YAW calculation - rotate to object
@@ -936,7 +987,8 @@ class Ai2Thor():
 
                 rgb_tensor = torch.FloatTensor([rgb]).permute(0, 3, 1, 2)
                 
-                actions_probability = self.cemnet(rgb_tensor, softmax=True)
+                with torch.no_grad():
+                    actions_probability = self.cemnet(rgb_tensor, softmax=True)
 
                 act_proba = actions_probability.data.numpy()[0]
 
@@ -949,11 +1001,18 @@ class Ai2Thor():
 
                 conf_cur = self.get_detectron_conf_center_obj(rgb, frame)
                 if conf_cur is None:
-                    reward = -0.2 # fixed negative reward for no detection 
+                    reward = -1 #-0.2 # fixed negative reward for no detection 
                     conf_cur = conf_prev
                     conf_prev = conf_prev # use same conf
                 else:
-                    reward = (conf_cur - conf_prev)/(1 - init_conf) # normalize by intial confidence to account for differences in starting confidence
+                    # reward = (conf_cur - conf_prev)/(1 - init_conf) # normalize by intial confidence to account for differences in starting confidence
+                    diff = conf_cur - conf_prev
+                    if diff > 0:
+                        reward = 1
+                    elif diff == 0:
+                        reward = 0
+                    else:
+                        reward = -1
                     conf_prev = conf_cur
                 
                 episode_rewards += reward
@@ -972,7 +1031,7 @@ class Ai2Thor():
                     break
 
                 frame += 1
-
+            st()
             return episode_rewards, obs, actions
 
             #     eulers_xyz_rad = np.radians(np.array([event.metadata['agent']['cameraHorizon'], event.metadata['agent']['rotation']['y'], 0.0]))
