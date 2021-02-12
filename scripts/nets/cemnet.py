@@ -38,14 +38,14 @@ class CEMNet(nn.Module):
             nn.Conv2d(in_channels=self.h2, out_channels=self.h2, kernel_size=3, stride=1, padding=0),
             nn.ReLU(),
             nn.MaxPool2d(2, 2),
-        )
+        ).cuda()
         self.fc_x = nn.Sequential(
             nn.Linear(238144, self.fc_dim),
             nn.ReLU(),
             nn.Linear(self.fc_dim, self.num_actions)
-        )
+        ).cuda()
 
-        self.softmax = nn.Softmax(dim=1)
+        self.softmax = nn.Softmax(dim=1).cuda()
 
     def forward(self, rgb, softmax=False):
         '''
@@ -59,6 +59,7 @@ class CEMNet(nn.Module):
             tf_emb: transformer embeddings, (S, N, E)
         '''
 
+        rgb = rgb.cuda()
         out = self.conv_x(rgb)
         out = out.reshape(out.size(0), -1)
         out = self.fc_x(out)
