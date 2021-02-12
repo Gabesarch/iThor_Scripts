@@ -18,6 +18,7 @@ from detectron2.config import get_cfg
 from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from PIL import Image
+from tensorboardX import SummaryWriter
 
 import subprocess
 import time
@@ -36,6 +37,7 @@ import torch.nn.functional as F
 from argparse import Namespace
 
 from nets.cemnet import CEMNet
+import utils.improc
 
 
 print(os.getcwd())
@@ -200,6 +202,13 @@ class Ai2Thor():
         self.val_interval = 15
         self.save_interval = 50
 
+        self.BATCH_SIZE = 1
+        self.percentile = 70
+        self.max_iters = 100000
+        self.max_frames = 1
+        self.val_interval = 1
+        self.save_interval = 1
+
         self.small_classes = []
         self.rot_interval = 5.0
         self.radius_max = 3.5 #3 #1.75
@@ -211,11 +220,13 @@ class Ai2Thor():
 
         self.obj_per_scene = 5
 
+        
+
         # self.origin_quaternion = np.quaternion(1, 0, 0, 0)
         # self.origin_rot_vector = quaternion.as_rotation_vector(self.origin_quaternion) 
 
-        self.homepath = f'/home/nel/gsarch/aithor/data/test2'
-        # self.basepath = '/home/nel/gsarch/replica_traj_bed'
+        # self.homepath = f'/home/nel/gsarch/aithor/data/test2'
+        self.homepath = '/home/sirdome/katefgroup/gsarch/ithor/data/test'
         if not os.path.exists(self.homepath):
             os.mkdir(self.homepath)
         else:
@@ -227,6 +238,13 @@ class Ai2Thor():
             else:
                 print("ENDING")
                 assert(False)
+
+        self.log_freq = 1
+        self.log_dir = self.homepath +'/..' + '/log_cem' + '/aa'
+        if not os.path.exists(self.log_dir):
+            os.mkdir(self.log_dir)
+        MAX_QUEUE = 10 # flushes when this amount waiting
+        self.writer = SummaryWriter(self.log_dir, max_queue=MAX_QUEUE, flush_secs=60)
 
 
         self.W = 256
@@ -388,7 +406,6 @@ class Ai2Thor():
             
             with torch.no_grad():
                 scores = self.cemnet(train, softmax=False)
-            st()
 
             loss_value = self.loss(scores,labels)
 
@@ -419,6 +436,13 @@ class Ai2Thor():
         for iteration, batch in enumerate(self.batch_iteration(self.mapnames_train,self.cemnet,self.BATCH_SIZE)):
             print("ITERATION #", iteration)
 
+            self.summ_writer = utils.improc.Summ_writer(
+                writer=self.writer,
+                global_step=iteration,
+                log_freq=self.log_freq,
+                fps=8,
+                just_gif=True)
+
             train, labels, mean_rewards, boudary = self.elite_batch(batch,self.percentile)
             mean_rewards_train.append(mean_rewards)
 
@@ -439,6 +463,7 @@ class Ai2Thor():
 
             if iteration >= self.max_iters:
                 print("MAX ITERS REACHED")
+                self.writer.close()
                 break
 
             # if self.plot_loss:
@@ -449,22 +474,27 @@ class Ai2Thor():
                 # plt.clf()
 
             if iteration % self.val_interval == 0:
-                loss_val, mean_rewards = self.run_val(self.mapnames_val, self.BATCH_SIZE)
+                loss_val, mean_reward_v = self.run_val(self.mapnames_val, self.BATCH_SIZE)
                 val_loss.append(float(loss_val.clone().detach().cpu().numpy()))
                 val_iters.append(iteration)
-                mean_rewards_val.append(mean_rewards)
+                mean_rewards_val.append(mean_reward_v)
                 if self.plot_loss:
                     # plt.figure(1) # loss
                     ax1.plot(val_iters, val_loss, color='red')
 
                     # plt.figure(2) # reward
                     ax2.plot(val_iters, mean_rewards_val, color='red')
+                    self.summ_writer.summ_scalar('unscaled_loss_val', loss_val)
+                    self.summ_writer.summ_scalar('unscaled_mean_reward_val', mean_reward_v)
 
             if iteration % self.save_interval == 0:
                 PATH = self.homepath + f'/checkpoint{iteration}.tar'
                 torch.save(self.cemnet.state_dict(), PATH)
             
             if self.plot_loss:
+                self.summ_writer.summ_scalar('unscaled_loss', loss_value)
+                self.summ_writer.summ_scalar('unscaled_mean_reward', mean_rewards)
+
                 # plt.figure(1) # loss
                 ax1.plot(train_iters, train_loss, color='blue')
                 ax1.set(xlabel='iterations', ylabel='loss')
@@ -652,11 +682,11 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
         seg_im = out.get_image()
 
-        if True:
+        if False:
             plt.figure(1)
             plt.clf()
             plt.imshow(seg_im)
-            plt_name = f'/home/nel/gsarch/aithor/data/test/seg{frame}.png'
+            plt_name = self.homepath + '/seg{frame}.png'
             plt.savefig(plt_name)
             # plt.show()
 
@@ -705,11 +735,11 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
         seg_im = out.get_image()
 
-        if True:
+        if False:
             plt.figure(1)
             plt.clf()
             plt.imshow(seg_im)
-            plt_name = '/home/nel/gsarch/aithor/data/test/seg_init.png'
+            plt_name = self.homepath + '/seg_init.png'
             plt.savefig(plt_name)
             # plt.show()
 
@@ -808,12 +838,12 @@ class Ai2Thor():
                 x_mid = np.round(np.median(pixel_locs_obj[1])/self.W, 4)
                 y_mid = np.round(np.median(pixel_locs_obj[0])/self.H, 4)
 
-                if True:
+                if False:
                     plt.figure(1)
                     plt.clf()
                     plt.imshow(obj_mask_focus)
                     plt.plot(np.median(pixel_locs_obj[1]), np.median(pixel_locs_obj[0]), 'x')
-                    plt_name = '/home/nel/gsarch/aithor/data/test/seg_mask.png'
+                    plt_name = self.homepath + '/seg_mask.png'
                     plt.savefig(plt_name)
 
                 
@@ -925,7 +955,6 @@ class Ai2Thor():
         while True: #successes < self.obj_per_scene and meta_obj_idx <= len(event.metadata['objects']) - 1: 
             if meta_obj_idx > len(event.metadata['objects']) - 1:
                 print("OUT OF OBJECT... RETURNING")
-                st()
                 return None, None, None
                 
             obj = objects[objects_inds[meta_obj_idx]]
@@ -1031,7 +1060,6 @@ class Ai2Thor():
                     break
 
                 frame += 1
-            st()
             return episode_rewards, obs, actions
 
             #     eulers_xyz_rad = np.radians(np.array([event.metadata['agent']['cameraHorizon'], event.metadata['agent']['rotation']['y'], 0.0]))
