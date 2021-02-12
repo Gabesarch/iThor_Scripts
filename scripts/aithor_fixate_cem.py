@@ -1003,7 +1003,7 @@ class Ai2Thor():
                 if conf_cur is None:
                     reward = -1 #-0.2 # fixed negative reward for no detection 
                     conf_cur = conf_prev
-                    conf_prev = conf_prev # use same conf
+                    # conf_prev = conf_prev # use same conf
                 else:
                     # reward = (conf_cur - conf_prev)/(1 - init_conf) # normalize by intial confidence to account for differences in starting confidence
                     diff = conf_cur - conf_prev
@@ -1013,7 +1013,7 @@ class Ai2Thor():
                         reward = 0
                     else:
                         reward = -1
-                    conf_prev = conf_cur
+                conf_prev = conf_cur
                 
                 episode_rewards += reward
 
