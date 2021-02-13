@@ -503,7 +503,7 @@ class Summ_writer(object):
         self.maxwidth = 1800
         # st()
 
-        self.save_this = (self.global_step % self.log_freq == 0)
+        self.save_this = True #(self.global_step % self.log_freq == 0)
         
 
     def summ_gif(self, name, tensor, blacken_zeros=False):

@@ -68,7 +68,7 @@ class Ai2Thor():
         # self.origin_quaternion = np.quaternion(1, 0, 0, 0)
         # self.origin_rot_vector = quaternion.as_rotation_vector(self.origin_quaternion) 
 
-        self.homepath = f'/home/nel/gsarch/aithor/data/test'
+        self.homepath = f'/home/sirdome/katefgroup/gsarch/ithor/data/test'
         # self.basepath = '/home/nel/gsarch/replica_traj_bed'
         if not os.path.exists(self.homepath):
             os.mkdir(self.homepath)
@@ -118,6 +118,7 @@ class Ai2Thor():
                 renderObjectImage=True,
                 renderDepthImage=True,
                 )
+            # self.controller.start()
             
             self.basepath = self.homepath + f"/{mapname}_{episode}"
             print("BASEPATH: ", self.basepath)

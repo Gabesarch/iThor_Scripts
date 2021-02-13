@@ -36,7 +36,8 @@ import torch.nn as nn
 import torch.nn.functional as F 
 from argparse import Namespace
 
-from nets.cemnet import CEMNet
+# from nets.cemnet import CEMNet
+from nets.localpnet import LocalPNET
 import utils.improc
 
 
@@ -180,7 +181,7 @@ class Ai2Thor():
             'ShowerCurtain', 'TVStand', 'Boots', 'RoomDecor', 'PaperTowelRoll', 'Ladle', 'Kettle', 'Safe', 'GarbageBag', 'TeddyBear', 
             'TableTopDecor', 'Dumbbell', 'Desktop', 'AluminumFoil', 'Window']
 
-        self.action_space = {0: "MoveLeft", 1: "MoveRight", 2: "MoveAhead", 3: "MoveBack"}
+        self.action_space = {0: "MoveLeft", 1: "MoveRight", 2: "MoveAhead", 3: "MoveBack", 4: "DoNothing"}
         self.num_actions = len(self.action_space)
 
         cfg_det = get_cfg()
@@ -269,21 +270,23 @@ class Ai2Thor():
         self.run_episodes()
     
     def init_network(self):
+
+        input_shape = np.array([3, self.W, self.H])
         
-        self.cemnet = CEMNet(h1=32, h2=64, fc_dim=1024, num_actions=self.num_actions)
+        self.localpnet = LocalPNET(input_shape=input_shape, num_actions=self.num_actions)
 
         self.loss = nn.CrossEntropyLoss()
 
-        self.optimizer = torch.optim.Adam(params=self.cemnet.parameters(),lr=0.01)
+        self.optimizer = torch.optim.Adam(params=self.localpnet.parameters(),lr=0.01)
     
     def preprocess_color(self,x):
         return x.astype(np.float32) * 1./255 - 0.5
 
     def batch_iteration(self,mapnames,NN,BATCH_SIZE):
 
-        batch = {"rewards": [], "obs": [], "actions": [], "obs_all": [], "seg_ims": []}
-        episode_rewards = 0.0
+        batch = {"total_loss": [], "actions": [], "obs_all": [], "seg_ims": [], "conf_end_change": [], "conf_avg_change": []}
         iter_idx = 0
+        total_loss = torch.tensor(0.0).cuda()
         while True:
 
             mapname = np.random.choice(mapnames)
@@ -305,65 +308,68 @@ class Ai2Thor():
                 renderDepthImage=True,
                 )
 
-            episode_rewards, obs, actions, seg_ims = self.run()
+            total_loss, obs, actions, seg_ims, confs = self.run("train", total_loss)
 
-            print("Total reward for train batch # ",iter_idx," :",episode_rewards)
+            confs = np.array(confs)
+            conf_end_change = confs[-1] - confs[0]
+            conf_avg_change = np.mean(np.diff(confs))
+
+            print("Total loss for train batch # ",iter_idx," :",total_loss)
 
             self.controller.stop()
             time.sleep(1)
 
-            if episode_rewards is None:
-                print("NO EPISODE REWARDS.. SKIPPING BATCH INSTANCE")
+            if obs is None:
+                print("NO EPISODE LOSS.. SKIPPING BATCH INSTANCE")
                 continue
 
-            batch["rewards"].append(episode_rewards)
-            batch["obs"].append(obs[1:]) # first obs is initial pos (for plotting)
             batch["actions"].append(actions) 
             # These are only used for plotting
             batch["obs_all"].append(obs)
             batch["seg_ims"].append(seg_ims)
+            batch["conf_end_change"].append(conf_end_change)
+            batch["conf_avg_change"].append(conf_avg_change)
 
             iter_idx += 1   
             print(len(batch["rewards"]))
             if len(batch["rewards"]) == BATCH_SIZE:
+                batch["total_loss"] = total_loss
+                print("Total loss for iter: ", total_loss)
 
                 yield batch
                 iter_idx = 0
-                batch = {"rewards": [], "obs": [], "actions": [], "obs_all": [], "seg_ims": []}
+                batch = {"total_loss": [], "actions": [], "obs_all": [], "seg_ims": [], "conf_end_change": [], "conf_avg_change": []}
                 
-            
-            if len(batch["rewards"]) > BATCH_SIZE:
-                st()
     
-    def elite_batch(self,batch,percentile):
+    # def elite_batch(self,batch,percentile):
 
-        rewards = np.array(batch["rewards"])
-        obs = batch["obs"]
-        actions = batch["actions"]
+    #     rewards = np.array(batch["rewards"])
+    #     obs = batch["obs"]
+    #     actions = batch["actions"]
 
-        rewards_mean = float(np.mean(rewards))
+    #     rewards_mean = float(np.mean(rewards))
         
-        rewards_boundary = np.percentile(rewards,percentile)
+    #     rewards_boundary = np.percentile(rewards,percentile)
 
-        print("Reward boundary: ", rewards_boundary)
+    #     print("Reward boundary: ", rewards_boundary)
 
-        rewards_mean = float(np.mean(rewards))
+    #     rewards_mean = float(np.mean(rewards))
 
-        training_obs = []
-        training_actions = []
+    #     training_obs = []
+    #     training_actions = []
 
-        for idx in range(rewards.shape[0]):
-            reward_idx = rewards[idx]
-            if reward_idx < rewards_boundary:
-                continue
+    #     for idx in range(rewards.shape[0]):
+    #         reward_idx = rewards[idx]
+    #         if reward_idx < rewards_boundary:
+    #             continue
 
-            training_obs.extend(obs[idx])
-            training_actions.extend(actions[idx])
+    #         training_obs.extend(obs[idx])
+    #         training_actions.extend(actions[idx])
 
-        obs_tensor = torch.FloatTensor(training_obs).permute(0, 3, 1, 2).cuda()
-        act_tensor = torch.LongTensor(training_actions).cuda()
+    #     obs_tensor = torch.FloatTensor(training_obs).permute(0, 3, 1, 2).cuda()
+    #     act_tensor = torch.LongTensor(training_actions).cuda()
 
-        return obs_tensor, act_tensor, rewards_mean, rewards_boundary
+    #     return obs_tensor, act_tensor, rewards_mean, rewards_boundary
     
     def run_val(self, mapnames, BATCH_SIZE, summ_writer=None):
         # run validation every x steps
@@ -396,34 +402,28 @@ class Ai2Thor():
                 renderDepthImage=True,
                 )
 
-            episode_rewards, obs, actions, seg_ims = self.run()
+            _, obs, actions, seg_ims, confs = self.run("val", None)
             seg_ims_batch.append(seg_ims)
             obs_ims_batch.append(obs)
-
-            print("Total reward for val batch # ",iter_idx," :",episode_rewards)
+            
+            confs = np.array(confs)
+            conf_end_change = confs[-1] - confs[0]
+            conf_avg_change = np.mean(np.diff(confs))
 
             self.controller.stop()
             time.sleep(1)
 
-            if episode_rewards is None:
+            if obs is None:
                 print("NO EPISODE REWARDS.. SKIPPING BATCH INSTANCE")
                 continue
 
-            batch["rewards"].append(episode_rewards)
-            batch["obs"].append(obs[1:]) # first obs is initial pos (for plotting)
-            batch["actions"].append(actions) 
+            # batch["obs"].append(obs[1:]) # first obs is initial pos (for plotting)
+            # batch["actions"].append(actions) 
 
             iter_idx += 1   
 
-            if len(batch["rewards"]) == BATCH_SIZE:
+            if len(batch["rewards"]) == 1: # only one for val
         
-                train, labels, mean_rewards, boudary = self.elite_batch(batch,self.percentile)
-            
-                with torch.no_grad():
-                    scores = self.cemnet(train, softmax=False)
-
-                loss_value = self.loss(scores,labels)
-
                 try:
                     if summ_writer is not None:
                         
@@ -476,23 +476,12 @@ class Ai2Thor():
             
 
         
-        return loss_value, mean_rewards
+        return conf_end_change, conf_avg_change
 
     def run_episodes(self):
         self.ep_idx = 0
-        # self.objects = []
 
-        train_loss = []
-        val_loss = []
-        train_iters = []
-        val_iters = []
-        mean_rewards_train = []
-        mean_rewards_val = []
-        if self.plot_loss:
-            # plt.figure(1) # loss
-            # plt.figure(2) # reward
-            fig, (ax1, ax2) = plt.subplots(1, 2)
-        for iteration, batch in enumerate(self.batch_iteration(self.mapnames_train,self.cemnet,self.BATCH_SIZE)):
+        for iteration, batch in enumerate(self.batch_iteration(self.mapnames_train,self.localpnet,self.BATCH_SIZE)):
             
             iter_actual = iteration + 1
             print("ITERATION #", iter_actual)
@@ -504,89 +493,35 @@ class Ai2Thor():
                 fps=8,
                 just_gif=True)
 
-            train, labels, mean_rewards, boudary = self.elite_batch(batch,self.percentile)
-            mean_rewards_train.append(mean_rewards)
-
-            weights = torch.ones(4).cuda()
-            weights[0] = torch.sum(labels==0)
-            weights[1] = torch.sum(labels==1)
-            weights[2] = torch.sum(labels==2)
-            weights[3] = torch.sum(labels==3)
-            
-            min_weight = torch.min(weights)
-            weights[0] = min_weight/weights[0]
-            weights[1] = min_weight/weights[1]
-            weights[2] = min_weight/weights[2]
-            weights[3] = min_weight/weights[3]
-
-            # self.loss = nn.CrossEntropyLoss(weight=weights)
+            loss_value = batch["total_loss"]
 
             self.optimizer.zero_grad()
-
-            scores = self.cemnet(train, softmax=True)
-
-            loss_value = self.loss(scores,labels)
 
             back_v = loss_value.backward()
 
             self.optimizer.step()
-
-            train_loss.append(float(loss_value.clone().detach().cpu().numpy()))
-            train_iters.append(iter_actual)
-
-            print('rewards mean = ',mean_rewards)
-            print('')
 
             if iter_actual >= self.max_iters:
                 print("MAX ITERS REACHED")
                 self.writer.close()
                 break
 
-            # if self.plot_loss:
-                # plt.figure(1) # loss
-                # fig.clf()
-
-                # plt.figure(2) # reward
-                # plt.clf()
-
             if iter_actual % self.val_interval == 0:
-                loss_val, mean_reward_v = self.run_val(self.mapnames_val, self.BATCH_SIZE, self.summ_writer)
-                val_loss.append(float(loss_val.clone().detach().cpu().numpy()))
-                val_iters.append(iter_actual)
-                mean_rewards_val.append(mean_reward_v)
+                conf_end_change, conf_avg_change = self.run_val(self.mapnames_val, self.BATCH_SIZE, self.summ_writer)
                 if self.plot_loss:
-                    # # plt.figure(1) # loss
-                    # ax1.plot(val_iters, val_loss, color='red')
-
-                    # # plt.figure(2) # reward
-                    # ax2.plot(val_iters, mean_rewards_val, color='red')
-                    self.summ_writer.summ_scalar('unscaled_loss_val', loss_val)
-                    self.summ_writer.summ_scalar('unscaled_mean_reward_val', mean_reward_v)
+                    self.summ_writer.summ_scalar('val_conf_end_change', conf_end_change)
+                    self.summ_writer.summ_scalar('val_conf_avg_change', conf_avg_change)
 
             if iter_actual % self.save_interval == 0:
                 PATH = self.homepath + f'/checkpoint{iter_actual}.tar'
-                torch.save(self.cemnet.state_dict(), PATH)
+                torch.save(self.localpnet.state_dict(), PATH)
             
             if self.plot_loss:
-                self.summ_writer.summ_scalar('unscaled_loss', loss_value)
-                self.summ_writer.summ_scalar('unscaled_mean_reward', mean_rewards)
-
-                # # plt.figure(1) # loss
-                # ax1.plot(train_iters, train_loss, color='blue')
-                # ax1.set(xlabel='iter_actuals', ylabel='loss')
-                # # ax1.xlabel('iter_actuals')
-                # # ax1.ylabel('loss')
-                # # plt_name = '/home/nel/gsarch/aithor/data/test/loss.png'
-                # # fig.savefig(plt_name)
-
-                # # plt.figure(2) # reward
-                # ax2.plot(train_iters, mean_rewards_train, color='blue')
-                # ax2.set(xlabel='iter_actuals', ylabel='reward')
-                # # ax2.xlabel('iter_actuals')
-                # # ax2.ylabel('reward')
-
-                # plt_name = os.path.join(self.homepath, 'train.png')
-                # fig.savefig(plt_name)
+                conf_end_change_t = np.mean(np.array(batch["conf_end_change"]))
+                conf_avg_change_t = np.mean(np.array(batch["conf_avg_change"]))
+                self.summ_writer.summ_scalar('train_conf_end_change', conf_end_change_t)
+                self.summ_writer.summ_scalar('train_conf_avg_change', conf_avg_change_t)
+                self.summ_writer.summ_scalar('total_loss', loss_value)
             
             ## PLOTTING #############
             try:
@@ -641,11 +576,6 @@ class Ai2Thor():
                 pass
                 
             self.writer.close() # close tensorboard to flush
-                
-
-            # if mean_rewards > 500:
-            #     print('Accomplished!')
-            #     break
 
     def save_datapoint(self, observations, data_path, viewnum, flat_view):
         if self.verbose:
@@ -659,12 +589,8 @@ class Ai2Thor():
         # Assuming all sensors have same extrinsics
         color_sensor_pos = observations["positions"] 
         color_sensor_rot = observations["rotations"] 
-        #print("POS ", agent_pos)
-        #print("ROT ", color_sensor_rot)
         object_list = observations['object_list']
 
-        # print(viewnum, agent_pos)
-        # print(agent_rot)
 
         if False:
             plt.imshow(rgb)
@@ -1066,7 +992,7 @@ class Ai2Thor():
 
         return turn_yaw, turn_pitch
 
-    def run(self, summ_writer=None):
+    def run(self, mode, total_loss, summ_writer=None):
         
         event = self.controller.step('GetReachablePositions')
         if not event.metadata['reachablePositions']:
@@ -1089,7 +1015,7 @@ class Ai2Thor():
         while True: #successes < self.obj_per_scene and meta_obj_idx <= len(event.metadata['objects']) - 1: 
             if meta_obj_idx > len(event.metadata['objects']) - 1:
                 print("OUT OF OBJECT... RETURNING")
-                return None, None, None, None
+                return total_loss, None, None, None
                 
             obj = objects[objects_inds[meta_obj_idx]]
             meta_obj_idx += 1
@@ -1131,6 +1057,10 @@ class Ai2Thor():
 
             # initialize object in center of FOV
             turn_yaw, turn_pitch = self.get_rotation_to_obj(obj_center, pos_s)
+            if mode=="train":
+                pos_s_prev = pos_s
+                turn_yaw_prev = turn_yaw
+                turn_yaw_prev = turn_pitch
             event = self.controller.step('TeleportFull', x=pos_s[0], y=pos_s[1], z=pos_s[2], rotation=dict(x=0.0, y=int(turn_yaw), z=0.0), horizon=int(turn_pitch))
             rgb = event.frame
             seg_ims = []
@@ -1147,46 +1077,77 @@ class Ai2Thor():
             obs.append(rgb)
             
             actions = []
+            confs = []
             episode_rewards = 0.0
             frame = 0
             while True:
 
                 rgb_tensor = torch.FloatTensor([rgb]).permute(0, 3, 1, 2).cuda()
                 
-                with torch.no_grad():
-                    actions_probability = self.cemnet(rgb_tensor, softmax=True)
+                if mode=="train":
+                    torch.set_grad_enabled(True)
+                    action_ind, act_proba = self.localpnet(rgb_tensor)
+                elif mode=="val":
+                    with torch.no_grad():
+                        action_ind, act_proba = self.localpnet(rgb_tensor)
 
-                act_proba = actions_probability.data.cpu().numpy()[0]
+                # action_ind, act_proba = actions_probability.data.cpu().numpy()[0]
 
-                action_ind = np.random.choice(len(act_proba),p=act_proba)
+                # action_ind = np.random.choice(len(act_proba),p=act_proba)
+
+                action_ind = action_ind.cpu().numpy()
 
                 action = self.action_space[action_ind]
                 print("ACTION=", action)
+                
+                # get best action in a confidence sense
+                if mode=="train":
+                    best_action = 4 # "DoNothing"
+                    best_conf = conf_prev
+                    for action_idx in range(self.num_actions):
+                        action_t = self.action_space[action_idx]
+                        event_t = self.controller.step(action_t)
+                        agent_position_t = np.array(list(event_t.metadata['agent']['position'].values())) + np.array([0.0, 0.675, 0.0])
+                        turn_yaw_t, turn_pitch_t = self.get_rotation_to_obj(obj_center, agent_position_t)
+                        event_t = self.controller.step('TeleportFull', x=agent_position_t[0], y=agent_position_t[1], z=agent_position_t[2], rotation=dict(x=0.0, y=int(turn_yaw_t), z=0.0), horizon=int(turn_pitch_t))
+                        rgb_t = event_t.frame
+                        conf_t, _ = self.get_detectron_conf_center_obj(rgb_t, frame)
+                        if conf_t is None:
+                            conf_t = best_conf - 1 # dont want no detection
+                        if conf_t > best_conf:
+                            best_action = action_idx
+                            best_conf = conf_t
+                        _ = self.controller.step('TeleportFull', x=pos_s_prev[0], y=pos_s_prev[1], z=pos_s_prev[2], rotation=dict(x=0.0, y=int(turn_yaw_prev), z=0.0), horizon=int(turn_pitch_prev))
+
+                    best_action = torch.tensor(best_action).cuda()
+                    total_loss += self.loss(act_proba, best_action)
+                
+                if action=="DoNothing":
+                    print("Do nothing reached")
+                    print("End confidence: ", conf_cur)
+                    break
 
                 event = self.controller.step(action)
                 agent_position = np.array(list(event.metadata['agent']['position'].values())) + np.array([0.0, 0.675, 0.0])
                 turn_yaw, turn_pitch = self.get_rotation_to_obj(obj_center, agent_position)
                 event = self.controller.step('TeleportFull', x=agent_position[0], y=agent_position[1], z=agent_position[2], rotation=dict(x=0.0, y=int(turn_yaw), z=0.0), horizon=int(turn_pitch))
 
+                if mode=="train":
+                    pos_s_prev = agent_position
+                    turn_yaw_prev = turn_yaw
+                    turn_yaw_prev = turn_pitch
+
                 rgb = event.frame
                 conf_cur, seg_im = self.get_detectron_conf_center_obj(rgb, frame)
                 seg_ims.append(seg_im)
                 if conf_cur is None:
-                    reward = -1 #-0.2 # fixed negative reward for no detection 
                     conf_cur = conf_prev
-                    # conf_prev = conf_prev # use same conf
-                else:
-                    # reward = (conf_cur - conf_prev)/(1 - init_conf) # normalize by intial confidence to account for differences in starting confidence
-                    diff = conf_cur - conf_prev
-                    if diff > 0:
-                        reward = 1
-                    elif diff == 0:
-                        reward = 0
-                    else:
-                        reward = -1
+
+                confs.append(conf_cur)
+
                 conf_prev = conf_cur
                 
-                episode_rewards += reward
+                # episode_rewards += reward
 
                 obs.append(rgb)
                 actions.append(action_ind)
@@ -1202,7 +1163,9 @@ class Ai2Thor():
                     break
 
                 frame += 1
-            return episode_rewards, obs, actions, seg_ims
+            
+            return total_loss, obs, actions, seg_ims, confs
+
 
             #     eulers_xyz_rad = np.radians(np.array([event.metadata['agent']['cameraHorizon'], event.metadata['agent']['rotation']['y'], 0.0]))
 
