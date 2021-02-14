@@ -48,7 +48,7 @@ class Ai2Thor():
         np.random.seed(1)
         random.shuffle(mapnames)
         self.mapnames = mapnames
-        self.num_episodes = len(self.mapnames)   
+        self.num_episodes = 10 #len(self.mapnames)   
 
         self.ignore_classes = []  
         # classes to save   
@@ -70,59 +70,59 @@ class Ai2Thor():
         # These are all classes shared between aithor and coco
         self.include_classes = [
             'Sink', 
-            'SinkBasin', 'Toilet', 'Faucet', 'Bed', 'Book', 
+            'Toilet', 'Bed', 'Book', 
             'CellPhone', 
             'AlarmClock', 'Laptop', 'Chair',
             'Television', 'RemoteControl', 'HousePlant', 
             'Ottoman', 'ArmChair', 'Sofa', 'BaseballBat', 'TennisRacket', 'Mug', 
             'Apple', 'Bottle', 'Microwave', 'Fork', 'Fridge', 
-            'WineBottle', 'Cup', 'Pot', 
-            'ButterKnife', 'StoveKnob', 'Toaster', 'Spoon', 'Plate', 'Knife', 'DiningTable', 'Bowl', 
+            'WineBottle', 'Cup', 
+            'ButterKnife', 'Toaster', 'Spoon', 'Knife', 'DiningTable', 'Bowl', 
             'Vase', 
             'TeddyBear', 
             ]
 
 
         self.maskrcnn_to_ithor = {
-            72:'Sink', 
-            72:'SinkBasin', 61:'Toilet', 72:'Faucet', 60:'Bed', 74:'Book', 
-            68:'CellPhone', 
-            75:'AlarmClock', 64:'Laptop', 57:'Chair',
-            62:'Television', 66:'RemoteControl', 59:'HousePlant', 
-            57:'Ottoman', 57:'ArmChair', 58:'Sofa', 35:'BaseballBat', 39:'TennisRacket', 42:'Mug', 
+            81:'Sink', 
+            70:'Toilet', 65:'Bed', 84:'Book', 
+            77:'CellPhone', 
+            85:'AlarmClock', 73:'Laptop', 62:'Chair',
+            72:'Television', 75:'RemoteControl', 64:'HousePlant', 
+            62:'Ottoman', 62:'ArmChair', 63:'Sofa', 39:'BaseballBat', 43:'TennisRacket', 47:'Mug', 
             48:'Apple', 40:'Bottle', 69:'Microwave', 43:'Fork', 72:'Fridge', 
-            41:'WineBottle', 42:'Cup', 
-            44:'ButterKnife', 70:'StoveKnob', 71:'Toaster', 45:'Spoon', 44:'Knife', 61:'DiningTable', 46:'Bowl', 
-            76:'Vase', 
-            78:'TeddyBear', 
+            44:'WineBottle', 47:'Cup', 
+            49:'ButterKnife', 80:'Toaster', 50:'Spoon', 49:'Knife', 67:'DiningTable', 51:'Bowl', 
+            86:'Vase', 
+            88:'TeddyBear', 
         }
 
         self.ithor_to_maskrcnn = {
-            'Sink':72, 
-            'SinkBasin':72, 'Toilet':61, 'Faucet':72, 'Bed':60, 'Book':74, 
-            'CellPhone':68, 
-            'AlarmClock':75, 'Laptop':64, 'Chair':57,
-            'Television':62, 'RemoteControl':66, 'HousePlant':59, 
-            'Ottoman':57, 'ArmChair':57, 'Sofa':58, 'BaseballBat':35, 'TennisRacket':39, 'Mug':42, 
-            'Apple':48, 40:'Bottle':40, 69:'Microwave':69, 43:'Fork':43, 72:'Fridge':72, 
-            'WineBottle':41, 'Cup':42, 
-            'ButterKnife':44, 'StoveKnob':70, 'Toaster':71, 'Spoon':45, 'Knife':44, 'DiningTable':61, 'Bowl':46, 
-            'Vase':76, 
-            'TeddyBear':78, 
+            'Sink':81, 
+            'Toilet':70, 'Bed':65, 'Book':84, 
+            'CellPhone':77, 
+            'AlarmClock':85, 'Laptop':73, 'Chair':62,
+            'Television':72, 'RemoteControl':75, 'HousePlant':64, 
+            'Ottoman':62, 'ArmChair':62, 'Sofa':63, 'BaseballBat':39, 'TennisRacket':43, 'Mug':47, 
+            'Apple':53, 'Bottle':44, 'Microwave':78, 'Fork':48, 'Fridge':82, 
+            'WineBottle':44, 'Cup':47, 
+            'ButterKnife':49, 'Toaster':80, 'Spoon':50, 'Knife':49, 'DiningTable':67, 'Bowl':51, 
+            'Vase':86, 
+            'TeddyBear':88, 
         }
 
         self.maskrcnn_to_catname = {
-            72:'sink', 
-            61:'dining table', 60:'bed', 74:'book', 
-            68:'cell phone', 
-            75:'clock', 64:'laptop', 57:'chair',
-            63:'tv', 66:'remote', 59:'potted plant', 
-            58:'couch', 35:'baseball bat', 39:'tennis racket', 42:'cup', 
-            48:'apple', 40:'bottle', 69:'microwave', 43:'fork', 72:'refrigerator', 
-            41:'wine glass', 
-            44:'knife', 70:'oven', 71:'toaster', 45:'spoon', 61:'dining table', 46:'bowl', 
-            76:'vase', 
-            78:'teddy bear', 
+            81:'sink', 
+            67:'dining table', 65:'bed', 84:'book', 
+            77:'cell phone', 70: 'toilet',
+            85:'clock', 73:'laptop', 62:'chair',
+            72:'tv', 75:'remote', 64:'potted plant', 
+            63:'couch', 39:'baseball bat', 43:'tennis racket', 47:'cup', 
+            53:'apple', 44:'bottle', 78:'microwave', 48:'fork', 82:'refrigerator', 
+            46:'wine glass', 
+            49:'knife', 79:'oven', 80:'toaster', 50:'spoon', 67:'dining table', 51:'bowl', 
+            86:'vase', 
+            88:'teddy bear', 
         }
 
         self.obj_conf_dict = {
@@ -146,6 +146,8 @@ class Ai2Thor():
         cfg_det.MODEL.DEVICE='cpu'
         self.cfg_det = cfg_det
         self.maskrcnn = DefaultPredictor(cfg_det)
+
+        self.maskrcnn_to_detectron = MetadataCatalog.get(self.cfg_det.DATASETS.TRAIN[0]).thing_dataset_id_to_contiguous_id
 
         self.small_classes = []
         self.rot_interval = 5.0
@@ -228,6 +230,8 @@ class Ai2Thor():
 
         self.controller.stop()
         time.sleep(1)
+
+        st()
 
     def save_datapoint(self, observations, data_path, viewnum, flat_view):
         if self.verbose:
@@ -505,7 +509,7 @@ class Ai2Thor():
                 # max_overlap = torch.sum(pred_masks_center)
         if ind_obj is None:
             print("RETURNING NONE")
-            return None, None
+            return None, None, None
 
         v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(self.cfg_det.DATASETS.TRAIN[0]), scale=1.0)
         out = v.draw_instance_predictions(outputs['instances'][ind_obj].to("cpu"))
@@ -518,15 +522,14 @@ class Ai2Thor():
             plt_name = self.homepath + f'/seg{frame}.png'
             plt.savefig(plt_name)
 
-        st()
-
         # print("OBJ CLASS ID=", int(pred_classes[ind_obj].detach().cpu().numpy()))
         # pred_boxes = outputs['instances'].pred_boxes.tensor
         # pred_classes = outputs['instances'].pred_classes
         # pred_scores = outputs['instances'].scores
-        obj_score = pred_scores[ind_obj]
+        obj_score = float(pred_scores[ind_obj].detach().cpu().numpy())
+        obj_pred_classes = int(pred_classes[ind_obj].detach().cpu().numpy())
 
-        return obj_score, seg_im
+        return obj_score, obj_pred_classes, seg_im
     
     def run(self):
         event = self.controller.step('GetReachablePositions')
@@ -563,6 +566,10 @@ class Ai2Thor():
                 continue
 
             obj_id = obj['objectId']
+            obj_class = obj['objectType']
+            maskrcnn_obj_id = self.ithor_to_maskrcnn[obj_class]
+            maskrcnn_obj_catname = self.maskrcnn_to_catname[maskrcnn_obj_id]
+            maskrcnn_obj_id = self.maskrcnn_to_detectron[maskrcnn_obj_id]
             # Calculate distance to object center
             obj_center = np.array(list(obj['axisAlignedBoundingBox']['center'].values()))
 
@@ -693,23 +700,24 @@ class Ai2Thor():
                     rgb = event.frame
 
                     instance_masks = event.instance_masks
-                    try:
-                        obj_mask = instance_masks[obj_id]
-                    except:
-                        st()
+                    obj_mask = instance_masks[obj_id]
 
                     obj_viewing_orientation = valid_yaw[s_ind] - angle
                     print("viewing orientation=", obj_viewing_orientation)
 
-                    conf, seg_im = self.get_detectron_conf_center_obj(rgb, obj_mask, frame=cnt)
+                    conf, pred_class, seg_im = self.get_detectron_conf_center_obj(rgb, obj_mask, frame=cnt)
 
                     if conf is None:
                         conf = 0
                         seg_im = rgb
-                    
-
-
-                    st()
+                        self.obj_conf_dict[maskrcnn_obj_catname].append([0, obj_viewing_orientation])
+                    else:
+                        # maskrcnn_obj_id = self.ithor_to_maskrcnn(obj_class)
+                        # maskrcnn_obj_catname = self.maskrcnn_to_catname(maskrcnn_obj_id)
+                        if maskrcnn_obj_id == pred_class:
+                            self.obj_conf_dict[maskrcnn_obj_catname].append([1, obj_viewing_orientation])
+                        else:
+                            self.obj_conf_dict[maskrcnn_obj_catname].append([0, obj_viewing_orientation])
 
                     eulers_xyz_rad = np.radians(np.array([event.metadata['agent']['cameraHorizon'], event.metadata['agent']['rotation']['y'], 0.0]))
 
