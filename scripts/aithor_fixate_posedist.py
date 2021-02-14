@@ -48,7 +48,7 @@ class Ai2Thor():
         np.random.seed(1)
         random.shuffle(mapnames)
         self.mapnames = mapnames
-        self.num_episodes = 10 #len(self.mapnames)   
+        self.num_episodes = 3 #len(self.mapnames)   
 
         self.ignore_classes = []  
         # classes to save   
@@ -231,7 +231,20 @@ class Ai2Thor():
         self.controller.stop()
         time.sleep(1)
 
-        st()
+        dict_keys = list(self.obj_conf_dict.keys())
+        for obj_idx in range(len(self.obj_conf_dict)):
+            key = dict_keys[obj_idx]
+            obj_cur_array = np.array(self.obj_conf_dict[key])
+            obj_cur_array_onlygood = obj_cur_array[obj_cur_array[:,0]==1][:,1]
+            plt.figure(1)
+            plt.clf()
+            bins = np.arange(-180, 180, 10)
+            plt.hist(obj_cur_array_onlygood)
+            plt.title(key)
+            plt.xlabel('Degrees to canonical pose')
+            plt.ylabel('Number of times prediction is correct')
+            plt_name = self.homepath + f'/hist_{key}.png'
+            plt.savefig(plt_name)
 
     def save_datapoint(self, observations, data_path, viewnum, flat_view):
         if self.verbose:
@@ -478,14 +491,14 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
         seg_im = out.get_image()
 
-        if True:
+        if False:
             plt.figure(1)
             plt.clf()
             plt.imshow(seg_im)
             plt_name = self.homepath + f'/seg_all{frame}.png'
             plt.savefig(plt_name)
 
-        if True:
+        if False:
             seg_im[W2_low:W2_high, H2_low:H2_high,:] = 0.0
             plt.figure(1)
             plt.clf()
@@ -496,7 +509,7 @@ class Ai2Thor():
         ind_obj = None
         # max_overlap = 0
         sum_obj_mask = np.sum(obj_mask)
-        mask_sum_thresh = 1000
+        mask_sum_thresh = 2000
         for idx in range(pred_masks.shape[0]):
             pred_mask_cur = pred_masks[idx].detach().cpu().numpy()
             pred_masks_center = pred_mask_cur[W2_low:W2_high, H2_low:H2_high]
@@ -515,7 +528,7 @@ class Ai2Thor():
         out = v.draw_instance_predictions(outputs['instances'][ind_obj].to("cpu"))
         seg_im = out.get_image()
 
-        if True:
+        if False:
             plt.figure(1)
             plt.clf()
             plt.imshow(seg_im)
