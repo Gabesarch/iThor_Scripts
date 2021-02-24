@@ -35,8 +35,11 @@ import PIL
 from PIL import Image
 from sklearn.decomposition import PCA
 from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report
+from sklearn.metrics import precision_recall_curve
 import seaborn as sn
 import pandas as pd
+from pandas.plotting import table
 
 import subprocess
 import time
@@ -71,6 +74,7 @@ class Ai2Thor():
         self.plot_loss = True
         # st()
 
+        # training house is first house
         mapnames = []
         for i in [1, 201, 301, 401]:
             mapname = 'FloorPlan' + str(i)
@@ -78,9 +82,9 @@ class Ai2Thor():
 
         # random.shuffle(mapnames)
         self.mapnames_train = mapnames
-        self.num_episodes = len(self.mapnames_train )   
+        self.num_episodes = len(self.mapnames_train)   
 
-        # get rest of the house in orders
+        # get rest of the houses in orders
         a = np.arange(2, 30)
         b = np.arange(202, 231)
         c = np.arange(302, 331)
@@ -191,33 +195,33 @@ class Ai2Thor():
         #     88:'teddy bear', 
         # }
 
-        self.obj_conf_dict = {
-            'sink':[], 
-            'dining table':[], 'bed':[], 'book':[], 
-            'cell phone':[], 
-            'clock':[], 'laptop':[], 'chair':[],
-            'tv':[], 'remote':[], 'potted plant':[], 
-            'couch':[], 'baseball bat':[], 'tennis racket':[], 'cup':[], 
-            'apple':[], 'bottle':[], 'microwave':[], 'fork':[], 'refrigerator':[], 
-            'wine glass':[], 
-            'knife':[], 'oven':[], 'toaster':[], 'spoon':[], 'dining table':[], 'bowl':[], 
-            'vase':[], 
-            'teddy bear':[], 
-        }
+        # self.obj_conf_dict = {
+        #     'sink':[], 
+        #     'dining table':[], 'bed':[], 'book':[], 
+        #     'cell phone':[], 
+        #     'clock':[], 'laptop':[], 'chair':[],
+        #     'tv':[], 'remote':[], 'potted plant':[], 
+        #     'couch':[], 'baseball bat':[], 'tennis racket':[], 'cup':[], 
+        #     'apple':[], 'bottle':[], 'microwave':[], 'fork':[], 'refrigerator':[], 
+        #     'wine glass':[], 
+        #     'knife':[], 'oven':[], 'toaster':[], 'spoon':[], 'dining table':[], 'bowl':[], 
+        #     'vase':[], 
+        #     'teddy bear':[], 
+        # }
 
-        self.data_store = {
-            'sink':{}, 
-            'dining table':{}, 'bed':{}, 'book':{}, 
-            'cell phone':{}, 
-            'clock':{}, 'laptop':{}, 'chair':{},
-            'tv':{}, 'remote':{}, 'potted plant':{}, 
-            'couch':{}, 'baseball bat':{}, 'tennis racket':{}, 'cup':{}, 
-            'apple':{}, 'bottle':{}, 'microwave':{}, 'fork':{}, 'refrigerator':{}, 
-            'wine glass':{}, 
-            'knife':{}, 'oven':{}, 'toaster':{}, 'spoon':{}, 'dining table':{}, 'bowl':{}, 
-            'vase':{}, 
-            'teddy bear':{}, 
-        }
+        # self.data_store = {
+        #     'sink':{}, 
+        #     'dining table':{}, 'bed':{}, 'book':{}, 
+        #     'cell phone':{}, 
+        #     'clock':{}, 'laptop':{}, 'chair':{},
+        #     'tv':{}, 'remote':{}, 'potted plant':{}, 
+        #     'couch':{}, 'baseball bat':{}, 'tennis racket':{}, 'cup':{}, 
+        #     'apple':{}, 'bottle':{}, 'microwave':{}, 'fork':{}, 'refrigerator':{}, 
+        #     'wine glass':{}, 
+        #     'knife':{}, 'oven':{}, 'toaster':{}, 'spoon':{}, 'dining table':{}, 'bowl':{}, 
+        #     'vase':{}, 
+        #     'teddy bear':{}, 
+        # }
 
         self.data_store_features = []
         self.feature_obj_ids = []
@@ -234,6 +238,8 @@ class Ai2Thor():
         # cfg_det.MODEL.DEVICE='cuda'
         # self.cfg_det = cfg_det
         # self.maskrcnn = DefaultPredictor(cfg_det)
+
+        print("Initializing detector...")
 
         cfg_det = get_cfg()
         cfg_det.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
@@ -260,14 +266,20 @@ class Ai2Thor():
             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])
 
+        print("DONE")
+
+        print("Initializing feature extractor...")
+
         # Initialize vgg
         vgg16 = torchvision.models.vgg16(pretrained=True).double().cuda()
         vgg16.eval()
-        print(torch.nn.Sequential(*list(vgg16.features.children())))
+        # print(torch.nn.Sequential(*list(vgg16.features.children())))
         self.vgg_feat_extractor = torch.nn.Sequential(*list(vgg16.features.children())[:-2])
-        print(self.vgg_feat_extractor)
+        # print(self.vgg_feat_extractor)
         self.vgg_mean = torch.from_numpy(np.array([0.485,0.456,0.406]).reshape(1,3,1,1))
         self.vgg_std = torch.from_numpy(np.array([0.229,0.224,0.225]).reshape(1,3,1,1))
+
+        print("DONE")
 
         self.conf_thresh_detect = 0.7 # for initially detecting a low confident object
         self.conf_thresh_init = 0.8 # for after turning head toward object threshold
@@ -290,7 +302,7 @@ class Ai2Thor():
         self.small_classes = []
         self.rot_interval = 5.0
         self.radius_max = 3.5 #3 #1.75
-        self.radius_min = 1.0 #1.25
+        self.radius_min = 0.1 #1.25
         self.num_flat_views = 3
         self.num_any_views = 7
         self.num_views = 25
@@ -298,7 +310,8 @@ class Ai2Thor():
 
         self.obj_per_scene = 5
 
-        mod = 'ds01'
+        mod = 'ds02' # saving out matched catnames and more plotting
+        mod = 'test00' # for debugging
 
         # self.homepath = f'/home/nel/gsarch/aithor/data/test2'
         self.homepath = '/home/sirdome/katefgroup/gsarch/ithor/data/' + mod
@@ -328,9 +341,7 @@ class Ai2Thor():
 
         self.fov = 90
 
-        self.utils = Utils(self.fov, self.W, self.H)
-        self.K = self.utils.get_habitat_pix_T_camX(self.fov)
-        self.camera_matrix = self.utils.get_camera_matrix(self.W, self.H, self.fov)
+        print("loading controller...")
 
         self.controller = Controller(
             scene='FloorPlan30', # will change 
@@ -341,8 +352,14 @@ class Ai2Thor():
             renderObjectImage=True,
             renderDepthImage=True,
             )
+        
+        print("DONE")
+        
+        self.utils = Utils(self.fov, self.W, self.H, controller=self.controller)
+        self.K = self.utils.get_habitat_pix_T_camX(self.fov)
+        self.camera_matrix = self.utils.get_camera_matrix(self.W, self.H, self.fov)
 
-        self.init_network()
+        # self.init_network()
 
         self.run_episodes()
     
@@ -447,6 +464,7 @@ class Ai2Thor():
         self.pred_catnames_all = []
         self.true_catnames_all = []
         self.conf_mats = []
+        self.probs = []
         # self.pred_catnames = []
 
         # get object centers from detections for next houses
@@ -504,7 +522,7 @@ class Ai2Thor():
                 self.unique_classes.extend(self.true_catnames)
                 self.unique_classes = list(set(self.unique_classes))
 
-                conf_mat = confusion_matrix(self.pred_catnames, self.true_catnames, labels=self.unique_classes)
+                conf_mat = confusion_matrix(self.true_catnames, self.pred_catnames, labels=self.unique_classes)
                 self.conf_mats.append(conf_mat)
                 
                 plt.figure(1)
@@ -527,7 +545,6 @@ class Ai2Thor():
                 self.unique_classes.extend(self.true_catnames_all)
                 self.unique_classes = list(set(self.unique_classes))
                 
-                
                 self.best_inner_prods = []
                 self.pred_ids = []
                 self.true_ids = []
@@ -535,33 +552,66 @@ class Ai2Thor():
                 self.pred_catnames = []
                 self.true_catnames = []
 
-                conf_mat = confusion_matrix(self.pred_catnames_all, self.true_catnames_all, labels=self.unique_classes)
+                # self.unique_classes = self.include_classes
+
+                conf_mat = confusion_matrix(self.true_catnames_all, self.pred_catnames_all, labels=self.unique_classes)
                 plt.figure(1)
                 plt.clf()
                 df_cm = pd.DataFrame(conf_mat, index = [i for i in self.unique_classes],
                   columns = [i for i in self.unique_classes])
-                plt.figure(figsize = (10,7))
+                plt.figure(figsize = (20,14))
                 sn.heatmap(df_cm, annot=True)
                 plt.xticks(np.arange(len(self.unique_classes))+0.5, self.unique_classes)
                 plt.yticks(np.arange(len(self.unique_classes))+0.5, self.unique_classes)
-                plt_name = self.homepath + f'/confusion_matrix_testhouses_all.png'
-                plt.savefig(plt_name)
+                plt_name = self.homepath + f'/confusion_matrix_testhouses_all_testhouse{self.ep_idx//4}.png'
+                plt.savefig(plt_name)                
+
+
+                # Classification report
+                class_report_dict = classification_report(self.true_catnames_all, self.pred_catnames_all, labels=self.unique_classes, output_dict=True)
+                df = pd.DataFrame(class_report_dict).transpose()
+
+                # set fig size
+                fig, ax = plt.subplots(figsize=(12, 20)) 
+                # no axes
+                ax.xaxis.set_visible(False)  
+                ax.yaxis.set_visible(False)  
+                # no frame
+                ax.set_frame_on(False)  
+                # plot table
+                tab = table(ax, df, loc='upper right')  
+                # set font manually
+                tab.auto_set_font_size(False)
+                tab.set_fontsize(8) 
+                plt.savefig(self.homepath + f'/classification_report_testhouse{self.ep_idx//4}.png')
+
+                # precision-recall curve
+                if not os.path.exists(self.homepath + '/pr_curves'):
+                    os.mkdir(self.homepath + '/pr_curves')
                 
+                for i in range(len(self.unique_classes)):
+                    plt.figure(1)
+                    plt.clf()
+                    class_cur = self.unique_classes[i]
+                    probs_class = [self.probs[self.true_catnames_all==class_cur]]
+                    if len(probs_class)==1:
+                        continue
+                    y_true = np.ones(len(probs_class))
+                    probs_class = np.array(probs_class)
+                    lr_precision, lr_recall, _ = precision_recall_curve(y_true, probs_class)
+                    no_skill = len(y_true[y_true==1]) / len(y_true)
+                    plt.plot([0, 1], [no_skill, no_skill], linestyle='--', label='No Skill')
+                    plt.plot(lr_recall, lr_precision, marker='.', label='Logistic')
+                    # axis labels
+                    plt.xlabel('Recall')
+                    plt.ylabel('Precision')
+                    # show the legend
+                    plt.legend()
+                    plt.savefig(self.homepath + f'/pr_curves/precision_recall_curve_testhouse{self.ep_idx//4}_{class_cur}.png')
+                    
+                plt.close('all')
 
             self.ep_idx += 1
-
-
-        # replot the end result
-        conf_mat = confusion_matrix(self.pred_catnames_all, self.true_catnames_all, labels=self.unique_classes)
-        plt.figure(1)
-        plt.clf()
-        df_cm = pd.DataFrame(conf_mat, index = [i for i in self.unique_classes],
-            columns = [i for i in self.unique_classes])
-        plt.figure(figsize = (10,7))
-        sn.heatmap(df_cm, annot=True)
-        plt.xticks(np.arange(len(self.unique_classes))+0.5, self.unique_classes)
-        plt.yticks(np.arange(len(self.unique_classes))+0.5, self.unique_classes)
-        plt.show()
 
         self.controller.stop()
         time.sleep(1)
@@ -850,7 +900,7 @@ class Ai2Thor():
         # meta_obj_idx = 0
         num_obs = 0
         # while successes < self.obj_per_scene and meta_obj_idx <= len(event.metadata['objects']) - 1: 
-        for obj in objects:
+        for obj in objects[:1]:
             # if meta_obj_idx > len(event.metadata['objects']) - 1:
             #     print("OUT OF OBJECT... RETURNING")
             #     return total_loss, None, None, None, None
@@ -991,6 +1041,7 @@ class Ai2Thor():
                     rgb = event.frame
 
                     if mode=="train":
+                        # for training we'll use ground truth everything
                         object_id = obj['objectId']   
                         instance_detections2D = event.instance_detections2D                 
                         if object_id not in instance_detections2D:
@@ -998,6 +1049,7 @@ class Ai2Thor():
                             continue
                         obj_instance_detection2D = instance_detections2D[object_id] # [start_x, start_y, end_x, end_y]
                     else:
+                        # here we'll get detected bounding box of object in center of view
                         obj_score, obj_pred_classes, obj_mask_new, object_bbox, seg_im = self.get_detectron_conf_center_obj(rgb, obj_mask, frame=None)
                         if obj_mask_new is None:
                             print("object mask is none.. continuing")
@@ -1005,8 +1057,8 @@ class Ai2Thor():
                         obj_mask = obj_mask_new
                         obj_instance_detection2D = object_bbox # predited box [start_x, start_y, end_x, end_y]
                     
-                    # print("obj_instance_detection2D=", obj_instance_detection2D)
 
+                    # crop image with some padding
                     max_len = np.max(np.array([obj_instance_detection2D[2] - obj_instance_detection2D[0], obj_instance_detection2D[3] - obj_instance_detection2D[1]]))
                     pad_len = max_len//12
 
@@ -1036,6 +1088,7 @@ class Ai2Thor():
 
                     normalize_cropped_rgb = self.normalize(rgb_crop).unsqueeze(0).double().cuda()
 
+                    # get vgg features of cropped object
                     obj_features = self.vgg_feat_extractor(normalize_cropped_rgb).view((512, -1))
 
                     obj_features = obj_features.detach().cpu().numpy()
@@ -1059,49 +1112,23 @@ class Ai2Thor():
 
                     elif mode=="test":
 
-                        # obj_features = obj_features.unsqueeze(0)
-
-                        # inner_prod = torch.abs(torch.mm(obj_features, self.data_store_features.T)).squeeze()
-
-                        # inner_prod = inner_prod.detach().cpu().numpy()
-
-                        # dist = np.squeeze(np.abs(np.matmul(obj_features, self.data_store_features.transpose())))
-
                         dist = np.linalg.norm(self.data_store_features-obj_features, axis=1)
 
-                        k = 10
+                        k = 20
 
                         ind_knn = list(np.argsort(dist)[:k])
 
                         dist_knn = np.sort(dist)[:k]
-                        dist_knn_norm = list(self.Softmax(torch.from_numpy(-dist_knn)).numpy())
+                        dist_knn_norm = self.Softmax(torch.from_numpy(-dist_knn)).numpy()
 
-                        match_knn_id = [self.feature_obj_ids[i] for i in ind_knn] 
+                        match_knn_id = np.array([self.feature_obj_ids[i] for i in ind_knn])
 
-                        # for i in range(1, len(match_knn_id)):
-
-                        # add softmax values from the same class (probably a really complex way of doing this)
-                        idx = 0
-                        dist_knn_norm_add = []
-                        match_knn_id_add = []
-                        while True:
-                            if not match_knn_id:
-                                break
-                            match_knn_cur = match_knn_id.pop(0)
-                            dist_knn_norm_cur = dist_knn_norm.pop(0)
-                            match_knn_id_add.append(match_knn_cur)
-                            idxs_ = []
-                            for i in range(len(match_knn_id)):
-                                if match_knn_id[i] == match_knn_cur:
-                                    dist_knn_norm_cur += dist_knn_norm[i]
-                                    # match_knn_id_.pop(i)
-                                else:
-                                    idxs_.append(i)
-                            match_knn_id = [match_knn_id[idx] for idx in idxs_]
-                            dist_knn_norm = [dist_knn_norm[idx] for idx in idxs_]
-                            dist_knn_norm_add.append(dist_knn_norm_cur)
-
-                        dist_knn_norm_add = np.array(dist_knn_norm_add)
+                        # add softmax values from the same class
+                        match_knn_id_add = np.unique(match_knn_id)
+                        dist_knn_norm_add = np.zeros(match_knn_id_add.shape[0])
+                        for i in range(match_knn_id_add.shape[0]):
+                            inds_class = match_knn_id == match_knn_id_add[i]
+                            dist_knn_norm_add[i] = np.sum(dist_knn_norm[inds_class])
 
                         dist_knn_argmax = np.argmax(dist_knn_norm_add)
 
@@ -1116,15 +1143,18 @@ class Ai2Thor():
                         self.pred_catnames.append(match_nn_catname)
                         self.true_catnames.append(object_type)
 
+                        best_prob = dist_knn_norm_add[dist_knn_argmax]
+                        self.probs.append(best_prob)
+
                         print(match_nn_catname)
 
                         if self.first_time_house:
                             self.first_time_house = False
                             self.data_store_features_cur_house = obj_features
-                            self.feature_obj_ids_cur_house.append(self.ithor_to_maskrcnn[object_type])
+                            self.feature_obj_ids_cur_house.append(match_nn_id)
                         else:
                             self.data_store_features_cur_house = np.vstack((self.data_store_features_cur_house, obj_features))
-                            self.feature_obj_ids_cur_house.append(self.ithor_to_maskrcnn[object_type])
+                            self.feature_obj_ids_cur_house.append(match_nn_id)
 
                         
 
