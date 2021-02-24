@@ -31,6 +31,9 @@ import threading
 import os
 import sys
 
+# import psutil
+# import signal 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
@@ -181,12 +184,40 @@ class Ai2Thor():
             'ShowerCurtain', 'TVStand', 'Boots', 'RoomDecor', 'PaperTowelRoll', 'Ladle', 'Kettle', 'Safe', 'GarbageBag', 'TeddyBear', 
             'TableTopDecor', 'Dumbbell', 'Desktop', 'AluminumFoil', 'Window']
 
+        self.include_classes_final = [
+            'Sink', 
+            'Toilet', 'Bed', 'Book', 
+            'CellPhone', 
+            'AlarmClock', 'Laptop', 'Chair',
+            'Television', 'RemoteControl', 'HousePlant', 
+            'Ottoman', 'ArmChair', 'Sofa', 'BaseballBat', 'TennisRacket', 'Mug', 
+            'Apple', 'Bottle', 'Microwave', 'Fork', 'Fridge', 
+            'WineBottle', 'Cup', 
+            'ButterKnife', 'Toaster', 'Spoon', 'Knife', 'DiningTable', 'Bowl', 
+            'Vase', 
+            'TeddyBear', 'StoveKnob', 'StoveBurner',
+            ]
+
+        # self.include_classes = [
+        #     'Sink', 
+        #     'Toilet', 'Bed', 'Book', 
+        #     'CellPhone', 
+        #     'AlarmClock', 'Laptop', 'Chair',
+        #     'Television', 'RemoteControl', 'HousePlant', 
+        #     'Ottoman', 'ArmChair', 'Sofa', 'BaseballBat', 'TennisRacket', 'Mug', 
+        #     'Apple', 'Bottle', 'Microwave', 'Fork', 'Fridge', 
+        #     'WineBottle', 'Cup', 
+        #     'ButterKnife', 'Toaster', 'Spoon', 'Knife', 'DiningTable', 'Bowl', 
+        #     'Vase', 
+        #     'TeddyBear', 
+        #     ]
+
         self.action_space = {0: "MoveLeft", 1: "MoveRight", 2: "MoveAhead", 3: "MoveBack", 4: "DoNothing"}
         self.num_actions = len(self.action_space)
 
         cfg_det = get_cfg()
         cfg_det.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
-        cfg_det.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.2  # set threshold for this model
+        cfg_det.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.1  # set threshold for this model
         cfg_det.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
         cfg_det.MODEL.DEVICE='cuda'
         self.cfg_det = cfg_det
@@ -196,12 +227,12 @@ class Ai2Thor():
         self.conf_thresh_init = 0.8 # for after turning head toward object threshold
         self.conf_thresh_end = 0.9 # if reach this then stop getting obs
 
-        self.BATCH_SIZE = 10
-        self.percentile = 70
+        self.BATCH_SIZE = 3
+        # self.percentile = 70
         self.max_iters = 100000
         self.max_frames = 10
-        self.val_interval = 5 #10
-        self.save_interval = 20
+        self.val_interval = 10 #10
+        self.save_interval = 50
 
         # self.BATCH_SIZE = 2
         # self.percentile = 70
@@ -221,13 +252,11 @@ class Ai2Thor():
 
         self.obj_per_scene = 5
 
-        
-
         # self.origin_quaternion = np.quaternion(1, 0, 0, 0)
         # self.origin_rot_vector = quaternion.as_rotation_vector(self.origin_quaternion) 
 
         # self.homepath = f'/home/nel/gsarch/aithor/data/test2'
-        self.homepath = '/home/sirdome/katefgroup/gsarch/ithor/data/test'
+        self.homepath = '/home/sirdome/katefgroup/gsarch/ithor/data/conf00'
         if not os.path.exists(self.homepath):
             os.mkdir(self.homepath)
         else:
@@ -241,7 +270,7 @@ class Ai2Thor():
                 assert(False)
 
         self.log_freq = 1
-        self.log_dir = self.homepath +'/..' + '/log_cem' + '/aa'
+        self.log_dir = self.homepath +'/..' + '/log_cem' + '/conf00'
         if not os.path.exists(self.log_dir):
             os.mkdir(self.log_dir)
         MAX_QUEUE = 10 # flushes when this amount waiting
@@ -265,6 +294,16 @@ class Ai2Thor():
         self.camera_matrix = self.get_camera_matrix(self.W, self.H, self.fov)
         self.K = self.get_habitat_pix_T_camX(self.fov)
 
+        self.controller = Controller(
+            scene='FloorPlan30', # will change 
+            gridSize=0.25,
+            width=self.W,
+            height=self.H,
+            fieldOfView= self.fov,
+            renderObjectImage=True,
+            renderDepthImage=True,
+            )
+
         self.init_network()
 
         self.run_episodes()
@@ -273,18 +312,18 @@ class Ai2Thor():
 
         input_shape = np.array([3, self.W, self.H])
         
-        self.localpnet = LocalPNET(input_shape=input_shape, num_actions=self.num_actions)
+        self.localpnet = LocalPNET(input_shape=input_shape, num_actions=self.num_actions).cuda()
 
         self.loss = nn.CrossEntropyLoss()
 
-        self.optimizer = torch.optim.Adam(params=self.localpnet.parameters(),lr=0.01)
+        self.optimizer = torch.optim.Adam(params=self.localpnet.parameters(),lr=0.00001)
     
     def preprocess_color(self,x):
         return x.astype(np.float32) * 1./255 - 0.5
 
-    def batch_iteration(self,mapnames,NN,BATCH_SIZE):
+    def batch_iteration(self,mapnames,BATCH_SIZE):
 
-        batch = {"total_loss": [], "actions": [], "obs_all": [], "seg_ims": [], "conf_end_change": [], "conf_avg_change": []}
+        batch = {"actions": [], "obs_all": [], "seg_ims": [], "conf_end_change": [], "conf_avg_change": [], "conf_median_change": []}
         iter_idx = 0
         total_loss = torch.tensor(0.0).cuda()
         while True:
@@ -298,30 +337,20 @@ class Ai2Thor():
             # if not os.path.exists(self.basepath):
             #     os.mkdir(self.basepath)
 
-            self.controller = Controller(
-                scene=mapname, 
-                gridSize=0.25,
-                width=self.W,
-                height=self.H,
-                fieldOfView= self.fov,
-                renderObjectImage=True,
-                renderDepthImage=True,
-                )
+            self.controller.reset(scene=mapname)
 
             total_loss, obs, actions, seg_ims, confs = self.run("train", total_loss)
-
-            confs = np.array(confs)
-            conf_end_change = confs[-1] - confs[0]
-            conf_avg_change = np.mean(np.diff(confs))
-
-            print("Total loss for train batch # ",iter_idx," :",total_loss)
-
-            self.controller.stop()
-            time.sleep(1)
 
             if obs is None:
                 print("NO EPISODE LOSS.. SKIPPING BATCH INSTANCE")
                 continue
+
+            print("Total loss for train batch # ",iter_idx," :",total_loss)
+
+            confs = np.array(confs)
+            conf_end_change = confs[-1] - confs[0]
+            conf_avg_change = np.mean(np.diff(confs))
+            conf_median_change = np.median(np.diff(confs))
 
             batch["actions"].append(actions) 
             # These are only used for plotting
@@ -329,16 +358,18 @@ class Ai2Thor():
             batch["seg_ims"].append(seg_ims)
             batch["conf_end_change"].append(conf_end_change)
             batch["conf_avg_change"].append(conf_avg_change)
+            batch["conf_median_change"].append(conf_median_change)
 
             iter_idx += 1   
-            print(len(batch["rewards"]))
-            if len(batch["rewards"]) == BATCH_SIZE:
-                batch["total_loss"] = total_loss
+
+            if len(batch["obs_all"]) == BATCH_SIZE:
+                # batch["total_loss"] = total_loss
                 print("Total loss for iter: ", total_loss)
 
-                yield batch
-                iter_idx = 0
-                batch = {"total_loss": [], "actions": [], "obs_all": [], "seg_ims": [], "conf_end_change": [], "conf_avg_change": []}
+                return total_loss, batch
+                # iter_idx = 0
+                # total_loss = torch.tensor(0.0).cuda()
+                # batch = {"actions": [], "obs_all": [], "seg_ims": [], "conf_end_change": [], "conf_avg_change": []}
                 
     
     # def elite_batch(self,batch,percentile):
@@ -374,9 +405,8 @@ class Ai2Thor():
     def run_val(self, mapnames, BATCH_SIZE, summ_writer=None):
         # run validation every x steps
 
-        batch = {"rewards": [], "obs": [], "actions": []}
+        # batch = {"rewards": [], "obs": [], "actions": []}
         episode_rewards = 0.0
-        episode_steps = []
         seg_ims_batch = []
         obs_ims_batch = []
 
@@ -392,37 +422,44 @@ class Ai2Thor():
             # if not os.path.exists(self.basepath):
             #     os.mkdir(self.basepath)
 
-            self.controller = Controller(
-                scene=mapname, 
-                gridSize=0.25,
-                width=self.W,
-                height=self.H,
-                fieldOfView= self.fov,
-                renderObjectImage=True,
-                renderDepthImage=True,
-                )
+            # self.controller = Controller(
+            #     scene=mapname, 
+            #     gridSize=0.25,
+            #     width=self.W,
+            #     height=self.H,
+            #     fieldOfView= self.fov,
+            #     renderObjectImage=True,
+            #     renderDepthImage=True,
+            #     )
+        
+            self.controller.reset(scene=mapname)
 
             _, obs, actions, seg_ims, confs = self.run("val", None)
+
+            # self.controller.stop()
+            # time.sleep(1)
+
+            if obs is None:
+                print("NO EPISODE REWARDS.. SKIPPING BATCH INSTANCE")
+                continue
+
             seg_ims_batch.append(seg_ims)
             obs_ims_batch.append(obs)
             
             confs = np.array(confs)
             conf_end_change = confs[-1] - confs[0]
             conf_avg_change = np.mean(np.diff(confs))
+            conf_median_change = np.median(np.diff(confs))
 
-            self.controller.stop()
-            time.sleep(1)
-
-            if obs is None:
-                print("NO EPISODE REWARDS.. SKIPPING BATCH INSTANCE")
-                continue
+            print("val confidence change (end-start):", conf_end_change)
+            print("val average confidence difference between frames", conf_avg_change)
 
             # batch["obs"].append(obs[1:]) # first obs is initial pos (for plotting)
             # batch["actions"].append(actions) 
 
             iter_idx += 1   
 
-            if len(batch["rewards"]) == 1: # only one for val
+            if len(obs_ims_batch) == 1: # only one for val
         
                 try:
                     if summ_writer is not None:
@@ -476,57 +513,60 @@ class Ai2Thor():
             
 
         
-        return conf_end_change, conf_avg_change
+        return conf_end_change, conf_avg_change, conf_median_change
 
     def run_episodes(self):
-        self.ep_idx = 0
 
-        for iteration, batch in enumerate(self.batch_iteration(self.mapnames_train,self.localpnet,self.BATCH_SIZE)):
+        iteration = 0
+        while True:
             
-            iter_actual = iteration + 1
-            print("ITERATION #", iter_actual)
+            iteration += 1
+            print("ITERATION #", iteration)
 
             self.summ_writer = utils.improc.Summ_writer(
                 writer=self.writer,
-                global_step=iter_actual,
+                global_step=iteration,
                 log_freq=self.log_freq,
                 fps=8,
                 just_gif=True)
 
-            loss_value = batch["total_loss"]
+            total_loss, batch = self.batch_iteration(self.mapnames_train,self.BATCH_SIZE)
 
             self.optimizer.zero_grad()
 
-            back_v = loss_value.backward()
+            total_loss.backward()
 
             self.optimizer.step()
 
-            if iter_actual >= self.max_iters:
+            if iteration >= self.max_iters:
                 print("MAX ITERS REACHED")
                 self.writer.close()
                 break
 
-            if iter_actual % self.val_interval == 0:
-                conf_end_change, conf_avg_change = self.run_val(self.mapnames_val, self.BATCH_SIZE, self.summ_writer)
+            if iteration % self.val_interval == 0:
+                conf_end_change, conf_avg_change, conf_median_change = self.run_val(self.mapnames_val, self.BATCH_SIZE, self.summ_writer)
                 if self.plot_loss:
                     self.summ_writer.summ_scalar('val_conf_end_change', conf_end_change)
                     self.summ_writer.summ_scalar('val_conf_avg_change', conf_avg_change)
+                    self.summ_writer.summ_scalar('val_conf_median_change', conf_median_change)
 
-            if iter_actual % self.save_interval == 0:
-                PATH = self.homepath + f'/checkpoint{iter_actual}.tar'
+            if iteration % self.save_interval == 0:
+                PATH = self.homepath + f'/checkpoint{iteration}.tar'
                 torch.save(self.localpnet.state_dict(), PATH)
             
             if self.plot_loss:
                 conf_end_change_t = np.mean(np.array(batch["conf_end_change"]))
                 conf_avg_change_t = np.mean(np.array(batch["conf_avg_change"]))
-                self.summ_writer.summ_scalar('train_conf_end_change', conf_end_change_t)
-                self.summ_writer.summ_scalar('train_conf_avg_change', conf_avg_change_t)
-                self.summ_writer.summ_scalar('total_loss', loss_value)
+                conf_median_change_t = np.mean(batch["conf_median_change"])
+                self.summ_writer.summ_scalar('train_conf_end_change_batchavg', conf_end_change_t)
+                self.summ_writer.summ_scalar('train_conf_avg_change_batchavg', conf_avg_change_t)
+                self.summ_writer.summ_scalar('train_conf_median_change_batchavg', conf_median_change_t)
+                self.summ_writer.summ_scalar('total_loss', total_loss)
             
             ## PLOTTING #############
             try:
                 summ_writer = self.summ_writer
-                if summ_writer is not None and (iter_actual % self.val_interval == 0):
+                if summ_writer is not None and (iteration % self.val_interval == 0):
                     obs_ims_batch = batch["obs_all"]
                     seg_ims_batch = batch["seg_ims"]
                         
@@ -576,6 +616,9 @@ class Ai2Thor():
                 pass
                 
             self.writer.close() # close tensorboard to flush
+
+        self.controller.stop()
+        time.sleep(10)
 
     def save_datapoint(self, observations, data_path, viewnum, flat_view):
         if self.verbose:
@@ -725,7 +768,63 @@ class Ai2Thor():
             if obj['objectType'] not in self.objects:
                 self.objects.append(obj['objectType'])
 
-    def get_detectron_conf_center_obj(self,im, frame=None):
+    # def get_detectron_conf_center_obj(self,im, frame=None):
+    #     im = Image.fromarray(im, mode="RGB")
+    #     im = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
+
+    #     # plt.imshow(im)
+    #     # plt.show()
+
+    #     outputs = self.maskrcnn(im)
+
+    #     v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(self.cfg_det.DATASETS.TRAIN[0]), scale=1.2)
+    #     out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
+    #     seg_im = out.get_image()
+
+    #     if False:
+    #         plt.figure(1)
+    #         plt.clf()
+    #         plt.imshow(seg_im)
+    #         plt_name = self.homepath + '/seg{frame}.png'
+    #         plt.savefig(plt_name)
+    #         # plt.show()
+
+    #     # seg_im = cv2.cvtColor(np.asarray(seg_im), cv2.COLOR_BGR2RGB)
+
+    #     pred_masks = outputs['instances'].pred_masks
+    #     pred_scores = outputs['instances'].scores
+    #     pred_classes = outputs['instances'].pred_classes
+
+    #     len_pad = 5
+
+    #     W2_low = self.W//2 - len_pad
+    #     W2_high = self.W//2 + len_pad
+    #     H2_low = self.H//2 - len_pad
+    #     H2_high = self.H//2 + len_pad
+
+    #     ind_obj = None
+    #     max_overlap = 0
+    #     for idx in range(pred_masks.shape[0]):
+    #         pred_mask_cur = pred_masks[idx]
+    #         pred_masks_center = pred_mask_cur[W2_low:W2_high, H2_low:H2_high]
+    #         # print(torch.sum(pred_masks_center))
+    #         if torch.sum(pred_masks_center) > max_overlap:
+    #             ind_obj = idx
+    #             max_overlap = torch.sum(pred_masks_center)
+    #     if ind_obj is None:
+    #         return None, seg_im
+
+    #     # print("OBJ CLASS ID=", int(pred_classes[ind_obj].detach().cpu().numpy()))
+    #     # pred_boxes = outputs['instances'].pred_boxes.tensor
+    #     # pred_classes = outputs['instances'].pred_classes
+    #     # pred_scores = outputs['instances'].scores
+    #     obj_score = pred_scores[ind_obj]
+
+        
+
+    #     return obj_score, seg_im
+
+    def get_detectron_conf_center_obj(self,im, obj_mask, frame=None):
         im = Image.fromarray(im, mode="RGB")
         im = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
 
@@ -733,20 +832,6 @@ class Ai2Thor():
         # plt.show()
 
         outputs = self.maskrcnn(im)
-
-        v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(self.cfg_det.DATASETS.TRAIN[0]), scale=1.2)
-        out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
-        seg_im = out.get_image()
-
-        if False:
-            plt.figure(1)
-            plt.clf()
-            plt.imshow(seg_im)
-            plt_name = self.homepath + '/seg{frame}.png'
-            plt.savefig(plt_name)
-            # plt.show()
-
-        # seg_im = cv2.cvtColor(np.asarray(seg_im), cv2.COLOR_BGR2RGB)
 
         pred_masks = outputs['instances'].pred_masks
         pred_scores = outputs['instances'].scores
@@ -759,27 +844,64 @@ class Ai2Thor():
         H2_low = self.H//2 - len_pad
         H2_high = self.H//2 + len_pad
 
+        if False:
+
+            v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(self.cfg_det.DATASETS.TRAIN[0]), scale=1.0)
+            out = v.draw_instance_predictions(outputs['instances'].to("cpu"))
+            seg_im = out.get_image()
+        
+            plt.figure(1)
+            plt.clf()
+            plt.imshow(seg_im)
+            plt_name = self.homepath + f'/seg_all{frame}.png'
+            plt.savefig(plt_name)
+
+            seg_im[W2_low:W2_high, H2_low:H2_high,:] = 0.0
+            plt.figure(1)
+            plt.clf()
+            plt.imshow(seg_im)
+            plt_name = self.homepath + f'/seg_all_mask{frame}.png'
+            plt.savefig(plt_name)
+
         ind_obj = None
-        max_overlap = 0
+        # max_overlap = 0
+        sum_obj_mask = np.sum(obj_mask)
+        mask_sum_thresh = 7000
         for idx in range(pred_masks.shape[0]):
-            pred_mask_cur = pred_masks[idx]
+            pred_mask_cur = pred_masks[idx].detach().cpu().numpy()
             pred_masks_center = pred_mask_cur[W2_low:W2_high, H2_low:H2_high]
+            sum_pred_mask_cur = np.sum(pred_mask_cur)
             # print(torch.sum(pred_masks_center))
-            if torch.sum(pred_masks_center) > max_overlap:
-                ind_obj = idx
-                max_overlap = torch.sum(pred_masks_center)
+            if np.sum(pred_masks_center) > 0:
+                if np.abs(sum_pred_mask_cur - sum_obj_mask) < mask_sum_thresh:
+                    ind_obj = idx
+                    mask_sum_thresh = np.abs(sum_pred_mask_cur - sum_obj_mask)
+                # max_overlap = torch.sum(pred_masks_center)
         if ind_obj is None:
-            return None, seg_im
+            print("RETURNING NONE")
+            return None, None, None, None
+
+        v = Visualizer(im[:, :, ::-1], MetadataCatalog.get(self.cfg_det.DATASETS.TRAIN[0]), scale=1.0)
+        out = v.draw_instance_predictions(outputs['instances'][ind_obj].to("cpu"))
+        seg_im = out.get_image()
+
+        if False:
+            plt.figure(1)
+            plt.clf()
+            plt.imshow(seg_im)
+            plt_name = self.homepath + f'/seg{frame}.png'
+            plt.savefig(plt_name)
 
         # print("OBJ CLASS ID=", int(pred_classes[ind_obj].detach().cpu().numpy()))
         # pred_boxes = outputs['instances'].pred_boxes.tensor
         # pred_classes = outputs['instances'].pred_classes
         # pred_scores = outputs['instances'].scores
-        obj_score = pred_scores[ind_obj]
+        obj_score = float(pred_scores[ind_obj].detach().cpu().numpy())
+        obj_pred_classes = int(pred_classes[ind_obj].detach().cpu().numpy())
+        obj_pred_mask = pred_masks[ind_obj].detach().cpu().numpy()
 
-        
 
-        return obj_score, seg_im
+        return obj_score, obj_pred_classes, obj_pred_mask, seg_im
 
     def detect_object_centroid(self, im, event):
 
@@ -849,14 +971,14 @@ class Ai2Thor():
         T_world_cam[0:3,3] = translation_
 
         if not obj_masks:
-            return None
+            return None, None
         elif self.center_from_mask: 
 
             # want an object not on the edges of the image
             sum_interior = 0
             while sum_interior==0:
                 if len(obj_masks)==0:
-                    return None
+                    return None, None
                 random_int = np.random.randint(low=0, high=len(obj_masks))
                 obj_mask_focus = obj_masks.pop(random_int)
                 print("OBJECT ID INIT=", obj_catids[random_int])
@@ -885,7 +1007,7 @@ class Ai2Thor():
             sum_interior = 0
             while True:
                 if len(obj_masks)==0:
-                    return None
+                    return None, None
                 random_int = np.random.randint(low=0, high=len(obj_masks))
                 obj_mask_focus = obj_masks.pop(random_int)
                 # print("OBJECT ID INIT=", obj_catids[random_int])
@@ -913,6 +1035,8 @@ class Ai2Thor():
                 xyz_obj_mid = None
                 for o in event.metadata['objects']:
                     if o['objectId'] == obj_focus_id:
+                        if o['objectType'] not in self.include_classes_final:
+                            continue
                         xyz_obj_mid = np.array(list(o['axisAlignedBoundingBox']['center'].values()))
                 
                 if xyz_obj_mid is not None:
@@ -921,7 +1045,7 @@ class Ai2Thor():
             #     st()
 
         print("MIDPOINT=", xyz_obj_mid)
-        return xyz_obj_mid
+        return xyz_obj_mid, obj_mask_focus
         
 
             # semantic = event.instance_segmentation_frame
@@ -1015,7 +1139,7 @@ class Ai2Thor():
         while True: #successes < self.obj_per_scene and meta_obj_idx <= len(event.metadata['objects']) - 1: 
             if meta_obj_idx > len(event.metadata['objects']) - 1:
                 print("OUT OF OBJECT... RETURNING")
-                return total_loss, None, None, None
+                return total_loss, None, None, None, None
                 
             obj = objects[objects_inds[meta_obj_idx]]
             meta_obj_idx += 1
@@ -1049,7 +1173,7 @@ class Ai2Thor():
             rgb = event.frame
 
             # get object center of a low confidence object
-            obj_center = self.detect_object_centroid(rgb, event)
+            obj_center, obj_mask = self.detect_object_centroid(rgb, event)
 
             if obj_center is None:
                 print("NO LOW CONFIDENCE OBJECTS... SKIPPING...")
@@ -1060,15 +1184,16 @@ class Ai2Thor():
             if mode=="train":
                 pos_s_prev = pos_s
                 turn_yaw_prev = turn_yaw
-                turn_yaw_prev = turn_pitch
+                turn_pitch_prev = turn_pitch
             event = self.controller.step('TeleportFull', x=pos_s[0], y=pos_s[1], z=pos_s[2], rotation=dict(x=0.0, y=int(turn_yaw), z=0.0), horizon=int(turn_pitch))
             rgb = event.frame
             seg_ims = []
             obs = []
-            init_conf, seg_im = self.get_detectron_conf_center_obj(rgb)
+            init_conf, obj_pred_classes, obj_mask, seg_im = self.get_detectron_conf_center_obj(rgb, obj_mask.detach().cpu().numpy())
             if init_conf is None:
                 print("Nothing detected in the center... SKIPPING")
                 continue
+            conf_cur = init_conf
             conf_prev = init_conf
             if init_conf > self.conf_thresh_init:
                 print("HIGH INITIAL CONFIDENCE... SKIPPING...")
@@ -1078,6 +1203,7 @@ class Ai2Thor():
             
             actions = []
             confs = []
+            confs.append(conf_cur)
             episode_rewards = 0.0
             frame = 0
             while True:
@@ -1095,23 +1221,26 @@ class Ai2Thor():
 
                 # action_ind = np.random.choice(len(act_proba),p=act_proba)
 
-                action_ind = action_ind.cpu().numpy()
+                action_ind = int(action_ind.detach().cpu().numpy())
 
                 action = self.action_space[action_ind]
                 print("ACTION=", action)
+
+                obs.append(rgb)
+                actions.append(action_ind)
                 
                 # get best action in a confidence sense
                 if mode=="train":
                     best_action = 4 # "DoNothing"
                     best_conf = conf_prev
-                    for action_idx in range(self.num_actions):
+                    for action_idx in [0,1,2,3]:
                         action_t = self.action_space[action_idx]
                         event_t = self.controller.step(action_t)
                         agent_position_t = np.array(list(event_t.metadata['agent']['position'].values())) + np.array([0.0, 0.675, 0.0])
                         turn_yaw_t, turn_pitch_t = self.get_rotation_to_obj(obj_center, agent_position_t)
                         event_t = self.controller.step('TeleportFull', x=agent_position_t[0], y=agent_position_t[1], z=agent_position_t[2], rotation=dict(x=0.0, y=int(turn_yaw_t), z=0.0), horizon=int(turn_pitch_t))
                         rgb_t = event_t.frame
-                        conf_t, _ = self.get_detectron_conf_center_obj(rgb_t, frame)
+                        conf_t, _, _, _ = self.get_detectron_conf_center_obj(rgb_t, obj_mask, frame)
                         if conf_t is None:
                             conf_t = best_conf - 1 # dont want no detection
                         if conf_t > best_conf:
@@ -1119,38 +1248,46 @@ class Ai2Thor():
                             best_conf = conf_t
                         _ = self.controller.step('TeleportFull', x=pos_s_prev[0], y=pos_s_prev[1], z=pos_s_prev[2], rotation=dict(x=0.0, y=int(turn_yaw_prev), z=0.0), horizon=int(turn_pitch_prev))
 
-                    best_action = torch.tensor(best_action).cuda()
+                    best_action = torch.LongTensor([best_action]).cuda()
                     total_loss += self.loss(act_proba, best_action)
                 
-                if action=="DoNothing":
-                    print("Do nothing reached")
-                    print("End confidence: ", conf_cur)
-                    break
+                    print("BEST ACTION=", self.action_space[int(best_action.detach().cpu().numpy())])
 
-                event = self.controller.step(action)
-                agent_position = np.array(list(event.metadata['agent']['position'].values())) + np.array([0.0, 0.675, 0.0])
-                turn_yaw, turn_pitch = self.get_rotation_to_obj(obj_center, agent_position)
-                event = self.controller.step('TeleportFull', x=agent_position[0], y=agent_position[1], z=agent_position[2], rotation=dict(x=0.0, y=int(turn_yaw), z=0.0), horizon=int(turn_pitch))
+                if not action=="DoNothing":
+                    event = self.controller.step(action)
+                    agent_position = np.array(list(event.metadata['agent']['position'].values())) + np.array([0.0, 0.675, 0.0])
+                    turn_yaw, turn_pitch = self.get_rotation_to_obj(obj_center, agent_position)
+                    event = self.controller.step('TeleportFull', x=agent_position[0], y=agent_position[1], z=agent_position[2], rotation=dict(x=0.0, y=int(turn_yaw), z=0.0), horizon=int(turn_pitch))
+                else:
+                    print("Do nothing reached")
+                    print("End confidence: ", conf_prev)
+                    break
 
                 if mode=="train":
                     pos_s_prev = agent_position
                     turn_yaw_prev = turn_yaw
-                    turn_yaw_prev = turn_pitch
+                    turn_pitch_prev = turn_pitch
 
                 rgb = event.frame
-                conf_cur, seg_im = self.get_detectron_conf_center_obj(rgb, frame)
+                conf_cur, obj_pred_classes, obj_mask_new, seg_im = self.get_detectron_conf_center_obj(rgb, obj_mask, frame)
                 seg_ims.append(seg_im)
                 if conf_cur is None:
                     conf_cur = conf_prev
+                    seg_im = rgb
+                else:
+                    obj_mask = obj_mask_new
+                
+                if True:
+                    plt.figure(1)
+                    plt.clf()
+                    plt.imshow(seg_im)
+                    plt_name = self.homepath + f'/seg{frame}.png'
+                    plt.savefig(plt_name)
 
                 confs.append(conf_cur)
 
                 conf_prev = conf_cur
-                
-                # episode_rewards += reward
 
-                obs.append(rgb)
-                actions.append(action_ind)
 
                 if conf_cur > self.conf_thresh_end:
                     print("CONFIDENCE THRESHOLD REACHED!")
@@ -1163,7 +1300,7 @@ class Ai2Thor():
                     break
 
                 frame += 1
-            
+                        
             return total_loss, obs, actions, seg_ims, confs
 
 

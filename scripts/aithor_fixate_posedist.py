@@ -19,6 +19,8 @@ from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from PIL import Image
 
+from scipy.stats import gaussian_kde
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
@@ -45,10 +47,9 @@ class Ai2Thor():
             mapname = 'FloorPlan' + str(i)
             mapnames.append(mapname)
 
-        np.random.seed(1)
         random.shuffle(mapnames)
         self.mapnames = mapnames
-        self.num_episodes = 3 #len(self.mapnames)   
+        self.num_episodes = len(self.mapnames)   
 
         self.ignore_classes = []  
         # classes to save   
@@ -141,9 +142,9 @@ class Ai2Thor():
 
         cfg_det = get_cfg()
         cfg_det.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
-        cfg_det.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.2  # set threshold for this model
+        cfg_det.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.01  # set threshold for this model
         cfg_det.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
-        cfg_det.MODEL.DEVICE='cpu'
+        cfg_det.MODEL.DEVICE='cuda'
         self.cfg_det = cfg_det
         self.maskrcnn = DefaultPredictor(cfg_det)
 
@@ -151,8 +152,8 @@ class Ai2Thor():
 
         self.small_classes = []
         self.rot_interval = 5.0
-        self.radius_max = 1.1 #3 #1.75
-        self.radius_min = 1 #1.25
+        self.radius_max = 2.1 #3 #1.75
+        self.radius_min = 2.0 #1.25
         self.num_flat_views = 3
         self.num_any_views = 7
         self.num_views = 25
@@ -162,8 +163,8 @@ class Ai2Thor():
         # self.origin_quaternion = np.quaternion(1, 0, 0, 0)
         # self.origin_rot_vector = quaternion.as_rotation_vector(self.origin_quaternion) 
 
-        # self.homepath = f'/home/sirdome/katefgroup/gsarch/ithor/data/test'
-        self.homepath = f'/home/nel/gsarch/aithor/data/test'
+        self.homepath = f'/home/sirdome/katefgroup/gsarch/ithor/data/obj_pose_2_0_low_thresh'
+        # self.homepath = f'/home/nel/gsarch/aithor/data/test'
         # self.basepath = '/home/nel/gsarch/replica_traj_bed'
         if not os.path.exists(self.homepath):
             os.mkdir(self.homepath)
@@ -234,18 +235,50 @@ class Ai2Thor():
         dict_keys = list(self.obj_conf_dict.keys())
         for obj_idx in range(len(self.obj_conf_dict)):
             key = dict_keys[obj_idx]
+            if not self.obj_conf_dict[key]:
+                print("skipping plotting for ", key)
+                continue
             obj_cur_array = np.array(self.obj_conf_dict[key])
             obj_cur_array_onlygood = obj_cur_array[obj_cur_array[:,0]==1][:,1]
+            obj_cur_array_onlybad = obj_cur_array[obj_cur_array[:,0]==0][:,1]
             plt.figure(1)
             plt.clf()
             bins = np.arange(-180, 180, 10)
-            plt.hist(obj_cur_array_onlygood)
-            plt.title(key)
+            # bin_angles = np.digitize(obj_cur_array[:,1], bins)
+            plt.hist(obj_cur_array_onlygood, label=['hit'], bins=bins)
+            plt.title(key + ' radius=' + str(self.radius_min))
             plt.xlabel('Degrees to canonical pose')
             plt.ylabel('Number of times prediction is correct')
-            plt_name = self.homepath + f'/hist_{key}.png'
+            plt.legend()
+            plt_name = self.homepath + f'/hist_justgood_{key}_radius_{self.radius_min}.png'
             plt.savefig(plt_name)
 
+            plt.figure(1)
+            plt.clf()
+            plt.hist([obj_cur_array_onlygood, obj_cur_array_onlybad], alpha=0.5, histtype='stepfilled', label=['hit', 'miss'], bins=bins)
+            plt.title(key + ' radius=' + str(self.radius_min))
+            plt.xlabel('Degrees to canonical pose')
+            plt.ylabel('Number of times prediction is correct')
+            plt.legend()
+            plt_name = self.homepath + f'/hist_both_{key}_radius_{self.radius_min}.png'
+            plt.savefig(plt_name)
+
+            plt.figure(1)
+            plt.clf()
+            if obj_cur_array_onlygood.shape[0] > 1:
+                density_good = gaussian_kde(obj_cur_array_onlygood)
+                plt.plot(bins, density_good(bins), label='hit')
+            if obj_cur_array_onlybad.shape[0] > 1:
+                density_bad = gaussian_kde(obj_cur_array_onlybad)
+                plt.plot(bins, density_bad(bins), label='miss')
+            # plt.hist([obj_cur_array_onlygood, obj_cur_array_onlybad], bins=bins, density=True, stacked=True)
+            plt.title(key + ' radius=' + str(self.radius_min))
+            plt.xlabel('Degrees to canonical pose')
+            plt.ylabel('Number of times prediction is correct')
+            plt.legend()
+            plt_name = self.homepath + f'/density_{key}_radius_{self.radius_min}.png'
+            plt.savefig(plt_name)
+        
     def save_datapoint(self, observations, data_path, viewnum, flat_view):
         if self.verbose:
             print("Print Sensor States.", self.agent.state.sensor_states)
@@ -509,7 +542,7 @@ class Ai2Thor():
         ind_obj = None
         # max_overlap = 0
         sum_obj_mask = np.sum(obj_mask)
-        mask_sum_thresh = 2000
+        mask_sum_thresh = 3000
         for idx in range(pred_masks.shape[0]):
             pred_mask_cur = pred_masks[idx].detach().cpu().numpy()
             pred_masks_center = pred_mask_cur[W2_low:W2_high, H2_low:H2_high]
@@ -548,7 +581,6 @@ class Ai2Thor():
         event = self.controller.step('GetReachablePositions')
         self.nav_pts = event.metadata['reachablePositions']
         self.nav_pts = np.array([list(d.values()) for d in self.nav_pts])
-        np.random.seed(1)
         # objects = np.random.choice(event.metadata['objects'], self.obj_per_scene, replace=False)
         objects = event.metadata['objects']
         objects_inds = np.arange(len(event.metadata['objects']))
@@ -713,6 +745,9 @@ class Ai2Thor():
                     rgb = event.frame
 
                     instance_masks = event.instance_masks
+                    if obj_id not in instance_masks:
+                        print("obj id not in object masks... continuing")
+                        continue
                     obj_mask = instance_masks[obj_id]
 
                     obj_viewing_orientation = valid_yaw[s_ind] - angle
@@ -729,6 +764,15 @@ class Ai2Thor():
                         # maskrcnn_obj_catname = self.maskrcnn_to_catname(maskrcnn_obj_id)
                         if maskrcnn_obj_id == pred_class:
                             self.obj_conf_dict[maskrcnn_obj_catname].append([1, obj_viewing_orientation])
+                            if False:
+                                if not os.path.exists(self.homepath + '/check_pose'):
+                                    os.mkdir(self.homepath + '/check_pose')
+                                plt.figure(1)
+                                plt.clf()
+                                plt.imshow(seg_im)
+                                plt.title(str(obj_viewing_orientation))
+                                plt_name = self.homepath + f'/check_pose/{maskrcnn_obj_catname}_{obj_viewing_orientation}.png'
+                                plt.savefig(plt_name)
                         else:
                             self.obj_conf_dict[maskrcnn_obj_catname].append([0, obj_viewing_orientation])
 
@@ -846,7 +890,6 @@ class Ai2Thor():
 #         event = self.controller.step('GetReachablePositions')
 #         self.nav_pts = event.metadata['reachablePositions']
 #         self.nav_pts = np.array([list(d.values()) for d in self.nav_pts])
-#         np.random.seed(1)
 #         # objects = np.random.choice(event.metadata['objects'], self.obj_per_scene, replace=False)
 #         objects = event.metadata['objects']
 #         objects_inds = np.arange(len(event.metadata['objects']))
@@ -1153,7 +1196,6 @@ class Ai2Thor():
 #                 print("Saving to ", data_path)
 #                 os.mkdir(data_path)
 #                 # flat_obs = np.random.choice(episodes, self.num_views, replace=False)
-#                 np.random.seed(1)
 #                 rand_inds = np.sort(np.random.choice(len(episodes), self.num_views, replace=False))
 #                 bool_inds = np.zeros(len(episodes), dtype=bool)
 #                 bool_inds[rand_inds] = True

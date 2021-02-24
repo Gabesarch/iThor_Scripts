@@ -5,11 +5,53 @@ import math
 
 
 class Utils():
-    def __init__(self, fov, W, H):  
+    def __init__(self, fov, W, H, controller):  
         self.H = H
         self.W = W
         self.fov = fov
         self.K = self.get_habitat_pix_T_camX(self.fov)
+        self.controller = controller
+
+    def get_object_properties(self, event, obj_instance_detection2D):
+        # assume object is in the center of FOV
+
+        # pixel_locs_obj = np.where(obj_mask)
+        # x_mid = np.round(np.median(pixel_locs_obj[1])/self.W, 4)
+        # y_mid = np.round(np.median(pixel_locs_obj[0])/self.H, 4)
+
+        x_mid = np.round(((obj_instance_detection2D[2] + obj_instance_detection2D[0]) // 2)/self.W, 4)
+        y_mid = np.round(((obj_instance_detection2D[3] + obj_instance_detection2D[1]) // 2)/self.H, 4)
+
+        event = self.controller.step('TouchThenApplyForce', x=x_mid, y=y_mid, handDistance = 1000000.0, direction=dict(x=0.0, y=0.0, z=0.0), moveMagnitude = 0.0)
+        obj_focus_id = event.metadata['actionReturn']['objectId']
+
+        obj = None
+        for o in event.metadata['objects']:
+            if o['objectId'] == obj_focus_id:
+                obj = o
+                break
+        
+        if obj is None:
+            return None, None, None, None
+
+        print(obj['objectId'])
+
+        rgb = event.frame
+
+        plt.figure(2)
+        plt.clf()
+        plt.imshow(rgb)
+        print(obj_instance_detection2D[0], obj_instance_detection2D[2], obj_instance_detection2D[1], obj_instance_detection2D[3])
+        plt.plot([obj_instance_detection2D[0], obj_instance_detection2D[2]], [obj_instance_detection2D[1], obj_instance_detection2D[3]], 'x', color='red')
+        print(x_mid*256, y_mid*256)
+        plt.plot(x_mid*256, y_mid*256, 'x', color='blue')
+        plt.show()
+
+        depth = event.depth_frame
+
+        st()
+        
+        return mass, temperature, salient, other
 
 
     def get_rotation_to_obj(self, obj_center, pos_s):
@@ -145,3 +187,14 @@ class Utils():
         with open(os.path.join(data_path, str(viewnum) + ".p"), 'wb') as f:
             pickle.dump(save_data, f)
         f.close()
+
+class Plotting():
+    def __init__(self, fov, W, H):  
+        self.H = H
+        self.W = W
+        self.fov = fov
+        self.K = self.get_habitat_pix_T_camX(self.fov)
+
+
+    def plotting_fun(self, obj_center, pos_s):
+        pass # todo

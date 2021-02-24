@@ -304,7 +304,7 @@ class Ai2Thor():
 
         self.obj_per_scene = 5
 
-        mod = 'ds01'
+        mod = 'test00'
 
         # self.homepath = f'/home/nel/gsarch/aithor/data/test2'
         self.homepath = '/home/sirdome/katefgroup/gsarch/ithor/data/' + mod
@@ -834,16 +834,42 @@ class Ai2Thor():
         print("MIDPOINT=", xyz_obj_mid)
         return xyz_obj_mid, obj_mask_focus, object_type, bbox
 
-    def get_object_properties(self, event):
+    def get_object_properties(self, event, obj_instance_detection2D):
         # assume object is in the center of FOV
+
+        # pixel_locs_obj = np.where(obj_mask)
+        # x_mid = np.round(np.median(pixel_locs_obj[1])/self.W, 4)
+        # y_mid = np.round(np.median(pixel_locs_obj[0])/self.H, 4)
+
+        x_mid = np.round(((obj_instance_detection2D[2] + obj_instance_detection2D[0]) // 2)/self.W, 4)
+        y_mid = np.round(((obj_instance_detection2D[3] + obj_instance_detection2D[1]) // 2)/self.H, 4)
 
         event = self.controller.step('TouchThenApplyForce', x=x_mid, y=y_mid, handDistance = 1000000.0, direction=dict(x=0.0, y=0.0, z=0.0), moveMagnitude = 0.0)
         obj_focus_id = event.metadata['actionReturn']['objectId']
 
+        obj = None
         for o in event.metadata['objects']:
             if o['objectId'] == obj_focus_id:
                 obj = o
                 break
+        
+        if obj is None:
+            return None, None, None, None
+
+        print(obj['objectId'])
+
+        rgb = event.frame
+
+        plt.figure(2)
+        plt.clf()
+        plt.imshow(rgb)
+        print(obj_instance_detection2D[0], obj_instance_detection2D[2], obj_instance_detection2D[1], obj_instance_detection2D[3])
+        plt.plot([obj_instance_detection2D[0], obj_instance_detection2D[2]], [obj_instance_detection2D[1], obj_instance_detection2D[3]], 'x', color='red')
+        print(x_mid*256, y_mid*256)
+        plt.plot(x_mid*256, y_mid*256, 'x', color='blue')
+        plt.show()
+
+        depth = event.depth_frame
 
         st()
         
@@ -1069,7 +1095,7 @@ class Ai2Thor():
                     # obj_features = torch.from_numpy(obj_features).view(-1).cuda()
                     obj_features = obj_features.flatten()
 
-                    self.get_object_properties(event)
+                    self.get_object_properties(event, obj_instance_detection2D)
 
                     if mode=="train":
                         if self.first_time:
@@ -1146,12 +1172,10 @@ class Ai2Thor():
                         if self.first_time_house:
                             self.first_time_house = False
                             self.data_store_features_cur_house = obj_features
-                            self.feature_obj_ids_cur_house.append(self.ithor_to_maskrcnn[object_type])
+                            self.feature_obj_ids_cur_house.append(match_nn_id)
                         else:
                             self.data_store_features_cur_house = np.vstack((self.data_store_features_cur_house, obj_features))
-                            self.feature_obj_ids_cur_house.append(self.ithor_to_maskrcnn[object_type])
-
-                        
+                            self.feature_obj_ids_cur_house.append(match_nn_id)
 
                         if False:
                             normalize_cropped_rgb = np.transpose(normalize_cropped_rgb.squeeze(0).detach().cpu().numpy(), (1,2,0))
